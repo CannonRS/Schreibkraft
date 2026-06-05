@@ -5,6 +5,7 @@ obj/
 *.user
 *.suo
 TestResults/
+artifacts/publish/
 artifacts/release/
 artifacts/installer/
 artifacts/**/*.zip
@@ -14,6 +15,6 @@ artifacts/**/*.zip
 *.pfx
 *.snk
 
-# Lokale Nutzerdaten liegen unter %LOCALAPPDATA%\S2T-Assistent und gehören nicht ins Repo.
+# Lokale Nutzerdaten liegen unter %LOCALAPPDATA%\Schreibkraft und gehören nicht ins Repo.
 settings.json
 logs/

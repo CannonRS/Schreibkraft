@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\MagicVoice.Core\MagicVoice.Core.csproj" />
+    <ProjectReference Include="..\..\src\Schreibkraft.Core\Schreibkraft.Core.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,9 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using MagicVoice.Core;
+using Schreibkraft.Core;
 using Xunit;
 
-namespace MagicVoice.Core.Tests;
+namespace Schreibkraft.Core.Tests;
 
 public class AssistantModeJsonConverterTests
 {

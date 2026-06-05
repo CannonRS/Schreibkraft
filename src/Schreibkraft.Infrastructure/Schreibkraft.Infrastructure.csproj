@@ -1,7 +1,7 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\MagicVoice.Core\MagicVoice.Core.csproj" />
+    <ProjectReference Include="..\Schreibkraft.Core\Schreibkraft.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

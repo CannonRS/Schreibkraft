@@ -1,10 +1,10 @@
-﻿param(
+param(
     [switch]$DesktopShortcut,
     [switch]$EnableAutostart,
     [switch]$SkipPrerequisites,
     [string]$DotNetDesktopRuntimeVersion = "10.0.7",
-    # Leer = Repo-Standard artifacts\release\Magic-Voice (Inhalt von .\Build.ps1).
-    # Auf anderem Rechner: z. B. -SourceDir "D:\Deploy\Magic-Voice" (kompletter Ordner inkl. MagicVoice.exe).
+    # Leer = Repo-Standard artifacts\publish\Schreibkraft (Inhalt von .\Build.ps1).
+    # Auf anderem Rechner: z. B. -SourceDir "D:\Deploy\Schreibkraft" (kompletter Ordner inkl. Schreibkraft.exe).
     [string]$SourceDir = ""
 )
 
@@ -141,7 +141,7 @@ function Resolve-InstallPayloadDirectory {
     )
 
     if ([string]::IsNullOrWhiteSpace($SourceDir)) {
-        return Join-Path $RepoRoot "artifacts\release\Magic-Voice"
+        return Join-Path $RepoRoot "artifacts\publish\Schreibkraft"
     }
 
     if ([System.IO.Path]::IsPathRooted($SourceDir)) {
@@ -151,23 +151,23 @@ function Resolve-InstallPayloadDirectory {
     return (Join-Path $RepoRoot $SourceDir.Trim()).TrimEnd('\', '/')
 }
 
-function Stop-MagicVoiceForInstallUpdate {
+function Stop-SchreibkraftForInstallUpdate {
     for ($i = 0; $i -lt 4; $i++) {
-        $running = Get-Process -Name "MagicVoice" -ErrorAction SilentlyContinue
+        $running = Get-Process -Name "Schreibkraft" -ErrorAction SilentlyContinue
         if (-not $running) {
             return
         }
 
         if ($i -eq 0) {
-            Write-Host "Beende laufende Magic-Voice vor Installation/Update ..."
+            Write-Host "Beende laufende Schreibkraft vor Installation/Update ..."
         }
 
         $running | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 600
     }
 
-    if (Get-Process -Name "MagicVoice" -ErrorAction SilentlyContinue) {
-        throw "Magic-Voice läuft noch und blockiert die Dateien. Bitte App schließen und Install.ps1 erneut ausführen."
+    if (Get-Process -Name "Schreibkraft" -ErrorAction SilentlyContinue) {
+        throw "Schreibkraft läuft noch und blockiert die Dateien. Bitte App schließen und Install.ps1 erneut ausführen."
     }
 }
 
@@ -175,10 +175,10 @@ function Stop-MagicVoiceForInstallUpdate {
 
 $repoRoot = $PSScriptRoot
 $payloadDir = Resolve-InstallPayloadDirectory -RepoRoot $repoRoot -SourceDir $SourceDir
-$target = Join-Path $env:LOCALAPPDATA "Programs\Magic-Voice"
-$startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Magic-Voice.lnk"
-$exe = Join-Path $target "MagicVoice.exe"
-$sourceExe = Join-Path $payloadDir "MagicVoice.exe"
+$target = Join-Path $env:LOCALAPPDATA "Programs\Schreibkraft"
+$startMenu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Schreibkraft.lnk"
+$exe = Join-Path $target "Schreibkraft.exe"
+$sourceExe = Join-Path $payloadDir "Schreibkraft.exe"
 
 if (-not $SkipPrerequisites) {
     Ensure-WindowsAppRuntime18
@@ -200,11 +200,11 @@ if ($null -eq $windowsAppRuntime) {
 }
 
 if (-not (Test-Path $sourceExe)) {
-    $hint = Join-Path $repoRoot "artifacts\release\Magic-Voice"
-    throw "MagicVoice.exe nicht gefunden: $sourceExe`n`nAuf dem Entwicklungsrechner zuerst .\Build.ps1 ausführen.`nVerteilbarer Ordner (komplett kopieren): $hint`nZielrechner: .\Install.ps1 -SourceDir mit dem Ordner, der MagicVoice.exe enthält."
+    $hint = Join-Path $repoRoot "artifacts\publish\Schreibkraft"
+    throw "Schreibkraft.exe nicht gefunden: $sourceExe`n`nAuf dem Entwicklungsrechner zuerst .\Build.ps1 ausführen.`nVerteilbarer Ordner (komplett kopieren): $hint`nZielrechner: .\Install.ps1 -SourceDir mit dem Ordner, der Schreibkraft.exe enthält."
 }
 
-Stop-MagicVoiceForInstallUpdate
+Stop-SchreibkraftForInstallUpdate
 
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 Get-ChildItem -Path $target -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
@@ -230,7 +230,7 @@ if (-not (Test-Path $startMenu)) {
 
 if ($DesktopShortcut) {
     $desktop = [Environment]::GetFolderPath("DesktopDirectory")
-    $desktopLink = Join-Path $desktop "Magic-Voice.lnk"
+    $desktopLink = Join-Path $desktop "Schreibkraft.lnk"
     $desktopShortcutObject = $shell.CreateShortcut($desktopLink)
     $desktopShortcutObject.TargetPath = $exe
     $desktopShortcutObject.Arguments = ""
@@ -242,10 +242,10 @@ if ($DesktopShortcut) {
 if ($EnableAutostart) {
     $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
     New-Item -Path $runKey -Force | Out-Null
-    Set-ItemProperty -Path $runKey -Name "Magic-Voice" -Value "`"$exe`""
+    Set-ItemProperty -Path $runKey -Name "Schreibkraft" -Value "`"$exe`""
 }
 
-Write-Host "Magic-Voice wurde installiert: $target"
+Write-Host "Schreibkraft wurde installiert: $target"
 Write-Host "Installationsquelle (kopierter Payload): $payloadDir"
 Write-Host "Startmenü-Verknüpfung: $startMenu"
 Write-Host "Ziel: $exe"

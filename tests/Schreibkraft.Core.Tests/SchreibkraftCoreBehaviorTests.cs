@@ -1,6 +1,6 @@
-﻿using MagicVoice.Core;
+using Schreibkraft.Core;
 
-namespace MagicVoice.Core.Tests;
+namespace Schreibkraft.Core.Tests;
 
 public class CoreBehaviorTests
 {
@@ -21,7 +21,7 @@ public class CoreBehaviorTests
         var ok = HotkeyParser.TryParse("A", out _, out var error);
 
         Assert.False(ok);
-        Assert.Contains("Zusatztaste", error);
+        Assert.Equal(L.S("hotkey.validation.need_modifier_and_key"), error);
     }
 
     [Fact]
@@ -51,7 +51,8 @@ public class CoreBehaviorTests
             new PlainSecretProtector(),
             new FakeHotkeys(),
             status,
-            new NullProcessingFailureLog());
+            new NullProcessingFailureLog(),
+            new NullProcessingHistoryLog());
 
         var result = await pipeline.RunAsync("any-id", null);
 
@@ -75,12 +76,68 @@ public class CoreBehaviorTests
             new PlainSecretProtector(),
             new FakeHotkeys(),
             new InMemoryTrayStatusService(),
-            new NullProcessingFailureLog());
+            new NullProcessingFailureLog(),
+            new NullProcessingHistoryLog());
 
         var result = await pipeline.RunAsync(settings.Assistants[0].Id, null);
 
         Assert.True(result.Success);
         Assert.Equal("Das ist ein Test", injector.InsertedText);
+    }
+
+    [Fact]
+    public async Task Pipeline_retries_clipboard_before_send_input_when_configured()
+    {
+        var injector = new ClipboardFailsUntilInjector(clipboardFailuresBeforeSuccess: 2);
+        var profile = new TestProfile();
+        var settings = ValidSettings(profile);
+        settings.InsertMethod = InsertMethod.Clipboard;
+        settings.ClipboardInsertRetriesOnFailure = 2;
+        var pipeline = new SpeechPipeline(
+            profile,
+            new FakeRecorder(new AudioBuffer([1, 2, 3, 4], 16000, 1, TimeSpan.FromSeconds(1))),
+            new FakeStt("Hallo"),
+            new FakeLlm("Fertig."),
+            injector,
+            new FakeSettingsService(settings),
+            new PlainSecretProtector(),
+            new FakeHotkeys(),
+            new InMemoryTrayStatusService(),
+            new NullProcessingFailureLog(),
+            new NullProcessingHistoryLog());
+
+        var result = await pipeline.RunAsync(settings.Assistants[0].Id, null);
+
+        Assert.True(result.Success);
+        Assert.Equal(3, injector.ClipboardCallCount);
+        Assert.Equal(0, injector.SendInputCallCount);
+        Assert.Equal("Fertig.", injector.LastText);
+    }
+
+    [Fact]
+    public async Task Pipeline_llm_retries_then_inserts_converted_text()
+    {
+        var injector = new FakeInjector();
+        var profile = new TestProfile();
+        var settings = ValidSettings(profile);
+        settings.LlmRetriesOnFailure = 2;
+        var pipeline = new SpeechPipeline(
+            profile,
+            new FakeRecorder(new AudioBuffer([1, 2, 3, 4], 16000, 1, TimeSpan.FromSeconds(1))),
+            new FakeStt("Quelle"),
+            new FlakyLlm(failuresBeforeSuccess: 2, successText: "Umgewandelt."),
+            injector,
+            new FakeSettingsService(settings),
+            new PlainSecretProtector(),
+            new FakeHotkeys(),
+            new InMemoryTrayStatusService(),
+            new NullProcessingFailureLog(),
+            new NullProcessingHistoryLog());
+
+        var result = await pipeline.RunAsync(settings.Assistants[0].Id, null);
+
+        Assert.True(result.Success);
+        Assert.Equal("Umgewandelt.", injector.InsertedText);
     }
 
     [Fact]
@@ -100,7 +157,8 @@ public class CoreBehaviorTests
             new PlainSecretProtector(),
             new FakeHotkeys(),
             new InMemoryTrayStatusService(),
-            new NullProcessingFailureLog());
+            new NullProcessingFailureLog(),
+            new NullProcessingHistoryLog());
 
         var result = await pipeline.RunAsync(settings.Assistants[0].Id, null);
 
@@ -128,7 +186,8 @@ public class CoreBehaviorTests
             new PlainSecretProtector(),
             new FakeHotkeys(),
             new InMemoryTrayStatusService(),
-            new NullProcessingFailureLog());
+            new NullProcessingFailureLog(),
+            new NullProcessingHistoryLog());
 
         var result = await pipeline.RunAsync(editAssistant.Id, "Originaltext aus der Zwischenablage");
 
@@ -160,6 +219,7 @@ public class CoreBehaviorTests
             new(AssistantMode.Transform, "Text", "Test", "Ctrl+Shift+1", "Bearbeite."),
             new(AssistantMode.AnswerClipboard, "Bearbeiten", "Test", "Ctrl+Shift+5", "Bearbeite den Quelltext.", RequiresClipboardSource: true)
         ];
+        public IReadOnlyList<PromptTemplate> PromptTemplates { get; } = Array.Empty<PromptTemplate>();
         public string IntensityStepName(AssistantMode mode, int intensity) => intensity.ToString();
         public string IntensityStepInstruction(AssistantMode mode, int intensity) => $"Stufe {intensity}";
         public string WritingStyleInstruction(WritingStyle style) => string.Empty;
@@ -236,6 +296,51 @@ public class CoreBehaviorTests
             }
 
             return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>Wirft bei den ersten N Aufrufen mit <see cref="InsertMethod.Clipboard"/>, danach kehrt erfolgreich zurück.</summary>
+    private sealed class ClipboardFailsUntilInjector(int clipboardFailuresBeforeSuccess) : IInputInjector
+    {
+        private int _clipboardFailures;
+
+        public int ClipboardCallCount { get; private set; }
+        public int SendInputCallCount { get; private set; }
+        public string? LastText { get; private set; }
+
+        public Task InsertTextAsync(string text, InsertMethod method, bool restoreClipboard, CancellationToken cancellationToken = default)
+        {
+            LastText = text;
+            if (method == InsertMethod.Clipboard)
+            {
+                ClipboardCallCount++;
+                if (_clipboardFailures < clipboardFailuresBeforeSuccess)
+                {
+                    _clipboardFailures++;
+                    throw new InvalidOperationException("Zwischenablage gesperrt");
+                }
+
+                return Task.CompletedTask;
+            }
+
+            SendInputCallCount++;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FlakyLlm(int failuresBeforeSuccess, string successText) : ILlmService
+    {
+        private int _failures;
+
+        public Task<string> ProcessAsync(LlmRequest request, CancellationToken cancellationToken = default)
+        {
+            if (_failures < failuresBeforeSuccess)
+            {
+                _failures++;
+                throw new InvalidOperationException("LLM vorübergehend nicht erreichbar");
+            }
+
+            return Task.FromResult(successText);
         }
     }
 

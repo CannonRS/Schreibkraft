@@ -5,17 +5,17 @@ VisualStudioVersion = 18.4.11702.344 oobstable
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MagicVoice.Core", "src\MagicVoice.Core\MagicVoice.Core.csproj", "{387F67C1-C631-43CE-81E1-9D0107F9F5FE}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Schreibkraft.Core", "src\Schreibkraft.Core\Schreibkraft.Core.csproj", "{387F67C1-C631-43CE-81E1-9D0107F9F5FE}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MagicVoice.Infrastructure", "src\MagicVoice.Infrastructure\MagicVoice.Infrastructure.csproj", "{510F4513-56BD-4106-9729-4362F9362596}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Schreibkraft.Infrastructure", "src\Schreibkraft.Infrastructure\Schreibkraft.Infrastructure.csproj", "{510F4513-56BD-4106-9729-4362F9362596}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MagicVoice", "src\MagicVoice\MagicVoice.csproj", "{1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Schreibkraft", "src\Schreibkraft\Schreibkraft.csproj", "{1A2B3C4D-5E6F-4A7B-8C9D-0E1F2A3B4C5D}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0AB3BF05-4346-4AA6-1389-037BE0695223}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MagicVoice.Core.Tests", "tests\MagicVoice.Core.Tests\MagicVoice.Core.Tests.csproj", "{BD2B525A-E22F-4827-9BDF-6F50052BCC68}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Schreibkraft.Core.Tests", "tests\Schreibkraft.Core.Tests\Schreibkraft.Core.Tests.csproj", "{BD2B525A-E22F-4827-9BDF-6F50052BCC68}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MagicVoice.Infrastructure.Tests", "tests\MagicVoice.Infrastructure.Tests\MagicVoice.Infrastructure.Tests.csproj", "{A6F75A2B-6B54-4464-A842-376F3886D71B}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Schreibkraft.Infrastructure.Tests", "tests\Schreibkraft.Infrastructure.Tests\Schreibkraft.Infrastructure.Tests.csproj", "{A6F75A2B-6B54-4464-A842-376F3886D71B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

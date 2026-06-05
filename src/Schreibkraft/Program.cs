@@ -1,13 +1,15 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
-using MagicVoice.Core;
-using MagicVoice.Infrastructure;
+using Schreibkraft.Core;
+using Schreibkraft.Infrastructure;
+using Schreibkraft.Infrastructure.Logging;
 
-namespace MagicVoice;
+namespace Schreibkraft;
 
 public sealed partial class App : Microsoft.UI.Xaml.Application
 {
@@ -22,6 +24,10 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
     private IAppProfile? _profile;
     private IClipboardSourceCapture? _clipboardCapture;
     private string? _capturedSourceText;
+    private string? _activeRecordingAssistantId;
+    private string? _pendingRecordingAssistantId;
+    private CancellationTokenSource? _recordingStartCts;
+    private bool _recordingActive;
     private Mutex? _singleInstanceMutex;
 
     public App()
@@ -29,19 +35,19 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
         InitializeComponent();
         UnhandledException += (_, args) =>
         {
-            MagicVoiceStartupCrashLogger.Write(args.Exception);
+            AppLogger.Write(args.Exception);
             args.Handled = true;
         };
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
             if (args.ExceptionObject is Exception ex)
             {
-                MagicVoiceStartupCrashLogger.Write(ex);
+                AppLogger.Write(ex);
             }
         };
         TaskScheduler.UnobservedTaskException += (_, args) =>
         {
-            MagicVoiceStartupCrashLogger.Write(args.Exception);
+            AppLogger.Write(args.Exception);
             args.SetObserved();
         };
     }
@@ -50,19 +56,30 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
     {
         try
         {
-            MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: start");
-            _services = ConfigureServices();
-            MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: services configured");
+            AppLogger.WriteMessage("OnLaunched: start");
+            _services = ServiceConfigurator.Build();
+            AppLogger.WriteMessage("OnLaunched: services configured");
             _profile = _services.GetRequiredService<IAppProfile>();
+            AppLogger.Configure(_profile.AppName, _profile.DataFolderName);
             _singleInstanceMutex = new Mutex(initiallyOwned: true, _profile.MutexName, out var firstInstance);
             if (!firstInstance)
             {
-                MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: another instance is already running, exiting");
+                AppLogger.WriteMessage("OnLaunched: another instance is already running, exiting");
                 Exit();
                 return;
             }
+            // Localize as early as possible — MainWindow's readonly field initializers call L.S(...),
+            // so the language must be applied BEFORE the window is constructed.
+            // 1) Apply system-detected language so default-fresh installs render in the OS language.
+            L.Apply(UiLanguage.Auto);
+            // 2) Load settings to learn the user's saved preference.
+            var settingsService = _services.GetRequiredService<ISettingsService>();
+            var earlySettings = await settingsService.LoadAsync();
+            // 3) Re-apply with the persisted preference (Auto keeps system-detection).
+            L.Apply(earlySettings.UiLanguage);
+
             _window = ActivatorUtilities.CreateInstance<MainWindow>(_services);
-            MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: window created");
+            AppLogger.WriteMessage("OnLaunched: window created");
             _hotkeys = _services.GetRequiredService<IHotkeyService>();
             _pipeline = _services.GetRequiredService<SpeechPipeline>();
             _recorder = _services.GetRequiredService<IAudioRecorder>();
@@ -73,81 +90,89 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
             _hotkeys.HotkeyDown += OnHotkeyDown;
             _hotkeys.HotkeyUp += OnHotkeyUp;
 
-            var settingsService = _services.GetRequiredService<ISettingsService>();
-            var settings = await settingsService.LoadAsync();
-            var readiness = settingsService.Validate(settings);
-            var startHidden = settings.LaunchMinimizedToTray && readiness.IsReady;
+            var earlyReady = settingsService.Validate(earlySettings).IsReady;
+            var deferWindowPresentation = earlySettings.LaunchMinimizedToTray && earlyReady;
 
-            if (startHidden)
+            // WinUI 3: Window.Activate macht das Fenster zwingend kurz sichtbar. Bei Tray-Start
+            // schieben wir es vorher off-screen, damit der erste Frame nicht im sichtbaren
+            // Monitorbereich aufblitzt. HideForDeferredPresentation versteckt es danach komplett.
+            if (deferWindowPresentation)
             {
-                // Off-Screen positionieren und aus Switcher/Taskbar ausblenden, damit Activate
-                // keinen sichtbaren Frame zeigt. HideToTray danach versteckt das Fenster vollständig.
-                _window.AppWindow.IsShownInSwitchers = false;
-                _window.AppWindow.Move(new Windows.Graphics.PointInt32(-32000, -32000));
+                _window.PreActivateMoveOffScreen();
             }
 
             _window.Activate();
+            AppLogger.WriteMessage("OnLaunched: window activated");
+            if (deferWindowPresentation)
+            {
+                _window.HideForDeferredPresentation();
+            }
+
+            await _window.InitializeAfterActivationAsync();
+            AppLogger.WriteMessage("OnLaunched: window initialized");
+            if (deferWindowPresentation)
+            {
+                _window.ReassertDeferredPresentationHidden();
+            }
+
+            var settingsModel = _window.Settings;
+            var hotkeyIssues = await _hotkeys.RegisterAsync(settingsModel);
+            AppLogger.WriteMessage("OnLaunched: hotkeys registered");
+            var readiness = settingsService.Validate(settingsModel);
+            var readyForTray = readiness.IsReady && hotkeyIssues.Count == 0;
+            var startHidden = settingsModel.LaunchMinimizedToTray && readyForTray;
+
             if (startHidden)
             {
+                if (deferWindowPresentation)
+                {
+                    _window.ReassertDeferredPresentationHidden();
+                }
+
                 _window.HideToTray();
                 _window.AppWindow.IsShownInSwitchers = true;
-                MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: started hidden in tray");
+                AppLogger.WriteMessage("OnLaunched: started hidden in tray");
             }
-            MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: window activated");
-            await _window.InitializeAfterActivationAsync();
-            MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: window initialized");
-
-            await _hotkeys.RegisterAsync(settings);
-            MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: hotkeys registered");
-            _tray = ActivatorUtilities.CreateInstance<TrayIconController>(_services, _window);
-            MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: tray created");
-
-            if (!readiness.IsReady)
+            else if (deferWindowPresentation)
             {
-                _status.SetStatus(TrayStatus.ConfigurationRequired, "Einrichtung erforderlich. Bitte prüfe die markierten Einstellungen.");
-                _window.Activate();
-                MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: configuration required");
+                _window.AppWindow.IsShownInSwitchers = true;
+                _window.ShowFromTray();
+                AppLogger.WriteMessage("OnLaunched: main window visible (tray start aborted)");
             }
             else
             {
-                _status.SetStatus(TrayStatus.Idle, "Bereit. Halte ein Tastenkürzel gedrückt, um zu diktieren.");
+                AppLogger.WriteMessage("OnLaunched: main window visible (no tray-only start)");
             }
 
-            MagicVoiceStartupCrashLogger.WriteMessage("OnLaunched: complete");
+            _tray = ActivatorUtilities.CreateInstance<TrayIconController>(_services, _window);
+            AppLogger.WriteMessage("OnLaunched: tray created");
+
+            if (hotkeyIssues.Count > 0)
+            {
+                _status.SetStatus(TrayStatus.ConfigurationRequired, string.Join(" ", hotkeyIssues.Select(issue => issue.Message)));
+            }
+            else if (!readiness.IsReady)
+            {
+                _status.SetStatus(TrayStatus.ConfigurationRequired, L.S("status.setup_required.long"));
+            }
+            else
+            {
+                _status.SetStatus(TrayStatus.Idle, L.S("status.ready.hint"));
+            }
+
+            AppLogger.WriteMessage("OnLaunched: complete");
         }
         catch (Exception ex)
         {
-            MagicVoiceStartupCrashLogger.Write(ex);
+            AppLogger.Write(ex);
             Exit();
         }
     }
 
-    private static ServiceProvider ConfigureServices()
-    {
-        var services = new ServiceCollection();
-        services.AddLogging(builder => builder.AddDebug());
-        services.AddSingleton<IAppProfile, MagicVoiceProfile>();
-        services.AddSingleton<ISettingsService, SettingsService>();
-        services.AddSingleton<ISecretProtector, DpapiSecretProtector>();
-        services.AddSingleton<ITrayStatusService, InMemoryTrayStatusService>();
-        services.AddSingleton<IProcessingFailureLog, InMemoryProcessingFailureLog>();
-        services.AddSingleton<IHotkeyService, LowLevelKeyboardHotkeyService>();
-        services.AddSingleton<IAudioDeviceService, NAudioDeviceService>();
-        services.AddSingleton<IAudioRecorder, NAudioRecorder>();
-        services.AddSingleton<IInputInjector, ClipboardInputInjector>();
-        services.AddSingleton<IAutostartService, WindowsAutostartService>();
-        services.AddSingleton<IFeedbackSoundService, NAudioFeedbackSoundService>();
-        services.AddSingleton<IClipboardSourceCapture, WindowsClipboardSourceCapture>();
-        services.AddSingleton<FileLogger>();
-        services.AddHttpClient<ISttService, OpenAiCompatibleSttService>();
-        services.AddHttpClient<ILlmService, OpenAiCompatibleLlmService>();
-        services.AddSingleton<SpeechPipeline>();
-        return services.BuildServiceProvider();
-    }
-
     private async void OnHotkeyDown(object? sender, HotkeyPressedEventArgs e)
     {
-        if (_status?.CurrentStatus is TrayStatus.Paused or TrayStatus.Processing or TrayStatus.Recording)
+        if (_status?.CurrentStatus is TrayStatus.Paused or TrayStatus.Processing or TrayStatus.Recording
+            || _pendingRecordingAssistantId is not null)
         {
             return;
         }
@@ -179,14 +204,35 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
 
         try
         {
-            _status?.SetStatus(TrayStatus.Recording, "Aufnahme läuft … Loslassen, um zu verarbeiten.");
-            await _recorder!.StartAsync();
-            _sounds?.PlayRecordingStart();
+            var startCts = new CancellationTokenSource();
+            _recordingStartCts = startCts;
+            _pendingRecordingAssistantId = e.AssistantId;
+
+            if (_sounds is not null)
+            {
+                await _sounds.PlayRecordingStartAsync(startCts.Token);
+            }
+
+            startCts.Token.ThrowIfCancellationRequested();
+            await _recorder!.StartAsync(startCts.Token);
+            _activeRecordingAssistantId = e.AssistantId;
+            _recordingActive = true;
+            _status?.SetStatus(TrayStatus.Recording, L.S("status.recording_release"));
+        }
+        catch (OperationCanceledException)
+        {
+            _capturedSourceText = null;
         }
         catch (InvalidOperationException)
         {
-            _status?.SetStatus(TrayStatus.Error, "Mikrofonzugriff fehlgeschlagen. Bitte prüfe Mikrofon und Windows-Datenschutzeinstellungen.");
+            _status?.SetStatus(TrayStatus.Error, L.S("error.mic_access"));
             _capturedSourceText = null;
+        }
+        finally
+        {
+            _pendingRecordingAssistantId = null;
+            _recordingStartCts?.Dispose();
+            _recordingStartCts = null;
         }
     }
 
@@ -200,8 +246,38 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
         var sourceText = _capturedSourceText;
         _capturedSourceText = null;
 
-        _sounds?.PlayRecordingStop();
-        await _pipeline.RunAsync(e.AssistantId, sourceText);
+        if (_pendingRecordingAssistantId == e.AssistantId && !_recordingActive)
+        {
+            _recordingStartCts?.Cancel();
+            return;
+        }
+
+        if (!_recordingActive || _activeRecordingAssistantId != e.AssistantId)
+        {
+            return;
+        }
+
+        _recordingActive = false;
+        _activeRecordingAssistantId = null;
+
+        AudioBuffer audio;
+        try
+        {
+            audio = await _recorder!.StopAsync();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Write(ex);
+            _status?.SetStatus(TrayStatus.Error, L.S("audio.recording_failed"));
+            return;
+        }
+
+        if (_sounds is not null)
+        {
+            await _sounds.PlayRecordingStopAsync();
+        }
+
+        await _pipeline.RunAsync(e.AssistantId, sourceText, audio);
     }
 
     private async Task<AssistantInstance?> ResolveAssistantAsync(string assistantId)
@@ -242,6 +318,7 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
 public sealed class TrayIconController : IDisposable
 {
     private const int TrayId = 1;
+    private const string TaskbarCreatedMessageName = "TaskbarCreated";
     private const int TrayCallbackMessage = 0x8000 + 42;
     private const int WmCommand = 0x0111;
     private const int WmDestroy = 0x0002;
@@ -275,6 +352,7 @@ public sealed class TrayIconController : IDisposable
     private readonly IHotkeyService _hotkeys;
     private readonly ISettingsService _settingsService;
     private readonly WndProc _wndProc;
+    private readonly uint _taskbarCreatedMessage;
     private readonly IntPtr _hwnd;
     private IntPtr _icon;
     private bool _ownsIcon;
@@ -287,15 +365,21 @@ public sealed class TrayIconController : IDisposable
         _status = status;
         _hotkeys = hotkeys;
         _settingsService = settingsService;
+        _taskbarCreatedMessage = RegisterWindowMessage(TaskbarCreatedMessageName);
+        if (_taskbarCreatedMessage == 0)
+        {
+            AppLogger.WriteMessage($"Tray RegisterWindowMessage failed: {Marshal.GetLastWin32Error()}");
+        }
+
         _wndProc = WindowProc;
         _hwnd = CreateMessageWindow(_wndProc);
         if (_hwnd == IntPtr.Zero)
         {
-            throw new InvalidOperationException("Tray-Fenster konnte nicht erstellt werden.");
+            throw new InvalidOperationException(L.S("error.tray_window"));
         }
 
-        AddOrUpdateIcon(TrayStatus.ConfigurationRequired, $"{_profile.AppName} - Einrichtung erforderlich", NimAdd);
         _status.StatusChanged += OnStatusChanged;
+        AddOrUpdateIcon(_status.CurrentStatus, TooltipFor(_status.CurrentStatus, _status.Message), NimAdd);
     }
 
     private void OnStatusChanged(object? sender, TrayStatusChangedEventArgs args) => Update(args.Status, args.Message);
@@ -314,15 +398,15 @@ public sealed class TrayIconController : IDisposable
             _status.SetStatus(
                 readiness.IsReady ? TrayStatus.Idle : TrayStatus.ConfigurationRequired,
                 readiness.IsReady
-                    ? "Bereit. Halte ein Tastenkürzel gedrückt, um zu diktieren."
-                    : "Einrichtung erforderlich. Bitte prüfe die markierten Einstellungen.");
+                    ? L.S("status.ready.hint")
+                    : L.S("status.setup_required.long"));
             return;
         }
 
         _hotkeys.Pause();
         if (_status.CurrentStatus != TrayStatus.Processing)
         {
-            _status.SetStatus(TrayStatus.Paused, "Inaktiv. Aktiviere die App im Tray-Menü, um Tastenkürzel zu nutzen.");
+            _status.SetStatus(TrayStatus.Paused, L.S("status.inactive.long"));
         }
     }
 
@@ -359,6 +443,13 @@ public sealed class TrayIconController : IDisposable
 
     private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam)
     {
+        if (_taskbarCreatedMessage != 0 && (uint)msg == _taskbarCreatedMessage)
+        {
+            AppLogger.WriteMessage("Tray TaskbarCreated received: re-adding icon");
+            AddOrUpdateIcon(_status.CurrentStatus, TooltipFor(_status.CurrentStatus, _status.Message), NimAdd);
+            return IntPtr.Zero;
+        }
+
         if (msg == TrayCallbackMessage)
         {
             var mouseMessage = lParam.ToInt32();
@@ -392,11 +483,11 @@ public sealed class TrayIconController : IDisposable
     private void ShowContextMenu()
     {
         var menu = CreatePopupMenu();
-        AppendMenu(menu, MfString | MfDefault, CmdOpen, "Öffnen");
+        AppendMenu(menu, MfString | MfDefault, CmdOpen, L.S("tray.open"));
         AppendMenu(menu, MfSeparator, 0, string.Empty);
-        AppendMenu(menu, MfString | (_hotkeys.IsPaused ? 0 : MfChecked) | (_status.CurrentStatus == TrayStatus.Recording ? MfGrayed : 0), CmdActive, "aktiv");
+        AppendMenu(menu, MfString | (_hotkeys.IsPaused ? 0 : MfChecked) | (_status.CurrentStatus == TrayStatus.Recording ? MfGrayed : 0), CmdActive, L.S("tray.active"));
         AppendMenu(menu, MfSeparator, 0, string.Empty);
-        AppendMenu(menu, MfString, CmdExit, "Beenden");
+        AppendMenu(menu, MfString, CmdExit, L.S("tray.exit"));
         GetCursorPos(out var point);
         SetForegroundWindow(_hwnd);
         var command = TrackPopupMenu(menu, TpmRightButton | TpmReturnCmd, point.X, point.Y, 0, _hwnd, IntPtr.Zero);
@@ -431,7 +522,8 @@ public sealed class TrayIconController : IDisposable
         TrayStatus.Processing => $"{_profile.AppName} - verarbeitet den Text",
         TrayStatus.Success => $"{_profile.AppName} - Text eingefügt",
         TrayStatus.Error => $"{_profile.AppName} - {message}",
-        TrayStatus.ConfigurationRequired => $"{_profile.AppName} - Einrichtung erforderlich",
+        TrayStatus.Attention => TrimTooltip($"{_profile.AppName} – {message}"),
+        TrayStatus.ConfigurationRequired => TrimTooltip($"{_profile.AppName} – {message}"),
         _ => _profile.AppName
     };
 
@@ -444,6 +536,7 @@ public sealed class TrayIconController : IDisposable
             TrayStatus.Processing => "TrayProcessing.ico",
             TrayStatus.Success => "TraySuccess.ico",
             TrayStatus.Error => "TrayError.ico",
+            TrayStatus.Attention => "TrayIdle.ico",
             TrayStatus.ConfigurationRequired => "TrayConfigurationRequired.ico",
             _ => "TrayIdle.ico"
         };
@@ -488,7 +581,7 @@ public sealed class TrayIconController : IDisposable
 
     private static IntPtr CreateMessageWindow(WndProc wndProc)
     {
-        var className = "MagicVoiceTrayWindow_" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
+        var className = "SchreibkraftTrayWindow_" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture);
         var moduleHandle = GetModuleHandle(null);
         var windowClass = new WindowClass
         {
@@ -499,14 +592,14 @@ public sealed class TrayIconController : IDisposable
         };
         if (RegisterClassEx(ref windowClass) == 0)
         {
-            MagicVoiceStartupCrashLogger.WriteMessage($"Tray RegisterClassEx failed: {Marshal.GetLastWin32Error()}");
+            AppLogger.WriteMessage($"Tray RegisterClassEx failed: {Marshal.GetLastWin32Error()}");
             return IntPtr.Zero;
         }
 
         var hwnd = CreateWindowEx(0, className, className, 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, moduleHandle, IntPtr.Zero);
         if (hwnd == IntPtr.Zero)
         {
-            MagicVoiceStartupCrashLogger.WriteMessage($"Tray CreateWindowEx failed: {Marshal.GetLastWin32Error()}");
+            AppLogger.WriteMessage($"Tray CreateWindowEx failed: {Marshal.GetLastWin32Error()}");
         }
 
         return hwnd;
@@ -600,6 +693,9 @@ public sealed class TrayIconController : IDisposable
     private static extern ushort RegisterClassEx(ref WindowClass lpWndClass);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint RegisterWindowMessage(string lpString);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateWindowEx(
         int dwExStyle,
         string lpClassName,
@@ -642,41 +738,6 @@ public sealed class TrayIconController : IDisposable
     private static extern int TrackPopupMenu(IntPtr hMenu, uint uFlags, int x, int y, int nReserved, IntPtr hWnd, IntPtr prcRect);
 }
 
-internal static class MagicVoiceStartupCrashLogger
-{
-    public static void WriteMessage(string message)
-    {
-        try
-        {
-            var logPath = LogPath();
-            Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-            File.AppendAllText(logPath, $"{DateTimeOffset.Now:O} {message}{Environment.NewLine}");
-        }
-        catch
-        {
-            // Startup logging must never create another startup failure.
-        }
-    }
-
-    public static void Write(Exception exception)
-    {
-        try
-        {
-            var logPath = LogPath();
-            Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
-            File.AppendAllText(
-                logPath,
-                $"{DateTimeOffset.Now:O}{Environment.NewLine}{exception}{Environment.NewLine}{Environment.NewLine}");
-        }
-        catch
-        {
-            // Startup logging must never create another startup failure.
-        }
-    }
-
-    private static string LogPath() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Magic-Voice",
-        "logs",
-        "startup-crash.log");
-}
+// AppLogger ist in den Template-konformen AppLogger umgezogen:
+// Schreibkraft.Infrastructure.Logging.AppLogger. Die Klasse ist vollständig durch
+// using-Alias bzw. direkten Namespace-Zugriff ersetzt.

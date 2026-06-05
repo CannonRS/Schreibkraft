@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
@@ -19,8 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\MagicVoice.Core\MagicVoice.Core.csproj" />
-    <ProjectReference Include="..\..\src\MagicVoice.Infrastructure\MagicVoice.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\Schreibkraft.Core\Schreibkraft.Core.csproj" />
+    <ProjectReference Include="..\..\src\Schreibkraft.Infrastructure\Schreibkraft.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

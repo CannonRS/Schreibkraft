@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace MagicVoice.Core;
+namespace Schreibkraft.Core;
 
 /// <summary>Liest gespeicherte Assistenten-Typen aus älteren Versionen und mappt sie auf die aktuellen Werte.</summary>
 public sealed class AssistantModeJsonConverter : JsonConverter<AssistantMode>

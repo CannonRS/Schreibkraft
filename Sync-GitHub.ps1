@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Fehlt "origin", wird es mit -OriginUrl angelegt (Vorgabe: öffentliches Repo
-    CannonRS/Magic-Voice). Danach wie gewohnt Pull/Push; Upstream setzt -u beim
+    CannonRS/Schreibkraft). Danach wie gewohnt Pull/Push; Upstream setzt -u beim
     ersten Push.
 
     Es wird immer auf -Branch gewechselt (Vorgabe: main); Pull/Push ohne Upstream
@@ -32,8 +32,20 @@
 .PARAMETER PushForceWithLease
     Bei Push: git push --force-with-lease (nur mit Absicht).
 
+.PARAMETER NoAutoCommit
+    Bei Push/PullPush: lokale Änderungen nicht automatisch committen.
+
+.PARAMETER CommitMessage
+    Commit-Nachricht für den automatischen Commit bei Push/PullPush.
+
 .PARAMETER OriginUrl
     URL für "git remote add origin", falls origin noch fehlt (HTTPS oder SSH).
+
+.PARAMETER ReleaseSetup
+    Erstellt oder aktualisiert nach dem Push ein GitHub Release und lädt den
+    Setup-Installer aus artifacts\installer hoch. Installiert GitHub CLI (gh)
+    automatisch, falls sie fehlt.
+    Fragt interaktiv Draft/Pre-Release und bei Bedarf Überschreiben ab. Alias: -Release.
 #>
 param(
     [ValidateSet("Pull", "Push", "PullPush")]
@@ -43,11 +55,16 @@ param(
     [switch]$AllowUnrelatedHistories,
     [switch]$PushForceWithLease,
     [switch]$SkipPull,
-    [string]$OriginUrl = "https://github.com/CannonRS/Magic-Voice.git"
+    [switch]$NoAutoCommit,
+    [string]$CommitMessage = "Synchronisiere lokale Änderungen",
+    [string]$OriginUrl = "https://github.com/CannonRS/Schreibkraft.git",
+    [Alias("Release")]
+    [switch]$ReleaseSetup
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = $PSScriptRoot
+$script:GitHubCliCommand = $null
 
 if ([string]::IsNullOrWhiteSpace($Branch)) {
     throw "Branch darf nicht leer sein (Vorgabe: main)."
@@ -76,6 +93,17 @@ function Assert-GitRepo {
     if (-not (Test-Path -LiteralPath (Join-Path $repoRoot ".git"))) {
         throw "Kein Git-Repository (.git fehlt unter $repoRoot)."
     }
+}
+
+function Get-AppVersion {
+    $propsPath = Join-Path $repoRoot "Directory.Build.props"
+    [xml]$props = Get-Content -LiteralPath $propsPath
+    $version = $props.Project.PropertyGroup.AppVersion
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "AppVersion wurde in Directory.Build.props nicht gefunden."
+    }
+
+    return $version.Trim()
 }
 
 function Get-CurrentBranchName {
@@ -115,7 +143,7 @@ function Ensure-Origin {
     }
 
     if ([string]::IsNullOrWhiteSpace($Url)) {
-        throw "Kein Remote 'origin' — bitte -OriginUrl setzen (oder einmalig manuell: git remote add origin ...)."
+        throw "Kein Remote 'origin' - bitte -OriginUrl setzen (oder einmalig manuell: git remote add origin ...)."
     }
 
     Invoke-RepoGit @("remote", "add", "origin", $Url.Trim())
@@ -129,8 +157,47 @@ function Show-Context {
         Write-Host "Upstream: $upstream"
     }
     else {
-        Write-Host "Kein Upstream — Pull/Push nutzen origin/$syncBranch (Tracking nach erstem Push -u)."
+        Write-Host "Kein Upstream - Pull/Push nutzen origin/$syncBranch (Tracking nach erstem Push -u)."
     }
+}
+
+function Test-WorkingTreeHasChanges {
+    $status = (& git -C $repoRoot status --porcelain)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git-Status konnte nicht ermittelt werden."
+    }
+
+    return ($null -ne $status -and $status.Count -gt 0)
+}
+
+function Invoke-AutoCommitLocalChanges {
+    if ($NoAutoCommit) {
+        Write-Host "Auto-Commit ist deaktiviert (-NoAutoCommit)."
+        return
+    }
+
+    if (-not (Test-WorkingTreeHasChanges)) {
+        Write-Host "Keine lokalen Änderungen für Auto-Commit."
+        return
+    }
+
+    $message = $CommitMessage.Trim()
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        throw "CommitMessage darf nicht leer sein, wenn Auto-Commit aktiv ist."
+    }
+
+    Invoke-RepoGit @("add", "-A")
+
+    & git -C $repoRoot diff --cached --quiet
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Keine committbaren Änderungen nach git add -A."
+        return
+    }
+    elseif ($LASTEXITCODE -ne 1) {
+        throw "Git-Diff gegen den Index ist fehlgeschlagen (Exit $LASTEXITCODE)."
+    }
+
+    Invoke-RepoGit @("commit", "-m", $message)
 }
 
 function Invoke-RepoPull {
@@ -158,7 +225,7 @@ function Invoke-RepoPull {
             & git -C $repoRoot merge-base HEAD $otherRef 2>$null | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 $useUnrelatedMerge = $true
-                Write-Host "Hinweis: kein gemeinsamer Vorfahr mit $otherRef — Pull mit --allow-unrelated-histories."
+                Write-Host "Hinweis: kein gemeinsamer Vorfahr mit $otherRef - Pull mit --allow-unrelated-histories."
             }
         }
     }
@@ -227,10 +294,267 @@ function Invoke-RepoPush {
     }
 }
 
+function Add-DirectoryToPath {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    if (-not (Test-Path -LiteralPath $Directory)) {
+        return
+    }
+
+    $pathParts = @($env:PATH -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (-not ($pathParts | Where-Object { $_ -ieq $Directory })) {
+        $env:PATH = "$Directory;$env:PATH"
+    }
+
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $userParts = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (-not ($userParts | Where-Object { $_ -ieq $Directory })) {
+        $newUserPath = if ([string]::IsNullOrWhiteSpace($userPath)) { $Directory } else { "$Directory;$userPath" }
+        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+    }
+}
+
+function Get-GitHubCliCommand {
+    if (-not [string]::IsNullOrWhiteSpace($script:GitHubCliCommand) -and (Test-Path -LiteralPath $script:GitHubCliCommand)) {
+        return $script:GitHubCliCommand
+    }
+
+    $command = Get-Command gh -ErrorAction SilentlyContinue
+    if ($command) {
+        $script:GitHubCliCommand = $command.Source
+        return $script:GitHubCliCommand
+    }
+
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "GitHub CLI\gh.exe"),
+        (Join-Path $env:ProgramFiles "GitHub CLI\bin\gh.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\GitHub CLI\gh.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\GitHub CLI\bin\gh.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\GitHub CLI Portable\gh.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\GitHub CLI Portable\bin\gh.exe")
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            Add-DirectoryToPath -Directory (Split-Path -Parent $candidate)
+            $script:GitHubCliCommand = $candidate
+            return $script:GitHubCliCommand
+        }
+    }
+
+    return $null
+}
+
+function Install-GitHubCliWithWinget {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+
+    Write-Host "GitHub CLI fehlt - installiere über winget ..."
+    & winget install --id GitHub.cli --source winget --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "winget-Installation ist fehlgeschlagen (Exit $LASTEXITCODE) - nutze portablen Fallback."
+        return $false
+    }
+
+    return ($null -ne (Get-GitHubCliCommand))
+}
+
+function Install-GitHubCliPortable {
+    $installRoot = Join-Path $env:LOCALAPPDATA "Programs\GitHub CLI Portable"
+    $zipPath = Join-Path $env:TEMP "gh-windows-amd64.zip"
+    $extractRoot = Join-Path $env:TEMP ("gh-portable-" + [guid]::NewGuid().ToString("N"))
+
+    Write-Host "GitHub CLI fehlt - installiere portabel nach $installRoot ..."
+    New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/cli/cli/releases/latest" -Headers @{ "User-Agent" = "Schreibkraft-Sync-GitHub" }
+        $asset = $release.assets | Where-Object { $_.name -match "windows_amd64\.zip$" } | Select-Object -First 1
+        if ($null -eq $asset) {
+            throw "Kein windows_amd64.zip Asset im aktuellen GitHub CLI Release gefunden."
+        }
+
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
+
+        $gh = Get-ChildItem -Path $extractRoot -Recurse -Filter gh.exe | Select-Object -First 1
+        if ($null -eq $gh) {
+            throw "gh.exe wurde im heruntergeladenen Archiv nicht gefunden."
+        }
+
+        Copy-Item -LiteralPath $gh.FullName -Destination (Join-Path $installRoot "gh.exe") -Force
+        $license = Get-ChildItem -Path (Split-Path -Parent $gh.FullName) -Filter LICENSE* -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($license) {
+            Copy-Item -LiteralPath $license.FullName -Destination $installRoot -Force
+        }
+
+        Add-DirectoryToPath -Directory $installRoot
+        $script:GitHubCliCommand = Join-Path $installRoot "gh.exe"
+        return $script:GitHubCliCommand
+    }
+    finally {
+        Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Ensure-GitHubCli {
+    $command = Get-GitHubCliCommand
+    if ($command) {
+        return $command
+    }
+
+    if (Install-GitHubCliWithWinget) {
+        return (Get-GitHubCliCommand)
+    }
+
+    return (Install-GitHubCliPortable)
+}
+
+function Ensure-GitHubCliAuthentication {
+    $null = & $script:GitHubCliCommand auth status 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        return
+    }
+
+    $credentialInput = "protocol=https`nhost=github.com`n`n"
+    $filled = $credentialInput | git credential fill 2>$null
+    $token = ($filled | Where-Object { $_ -like "password=*" } | Select-Object -First 1) -replace "^password=", ""
+
+    if (-not [string]::IsNullOrWhiteSpace($token)) {
+        $env:GH_TOKEN = $token
+        $null = & $script:GitHubCliCommand auth status 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+    }
+
+    throw "GitHub CLI ist installiert, aber nicht angemeldet. Einmalig ausführen: gh auth login"
+}
+
+function Test-GitHubReleaseExists {
+    param([Parameter(Mandatory = $true)][string]$Tag)
+
+    $null = & $script:GitHubCliCommand release view $Tag 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Read-YesNo {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Question,
+        [bool]$Default = $false
+    )
+
+    $suffix = if ($Default) { "[J/n]" } else { "[j/N]" }
+
+    while ($true) {
+        $answer = (Read-Host "$Question $suffix").Trim().ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($answer)) {
+            return $Default
+        }
+
+        switch ($answer) {
+            { $_ -in @("j", "ja", "y", "yes") } { return $true }
+            { $_ -in @("n", "nein", "no") } { return $false }
+            default { Write-Host "Bitte 'j' oder 'n' eingeben." }
+        }
+    }
+}
+
+function Get-ReleaseOptions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Version,
+        [Parameter(Mandatory = $true)]
+        [string]$DefaultSetupPath
+    )
+
+    $title = "Schreibkraft $Version"
+    $notes = "Setup-Installer für Schreibkraft $Version."
+    $setup = $DefaultSetupPath
+    $draft = $false
+    $prerelease = $false
+
+    Write-Host "Release-Version: $Version"
+    Write-Host "Release-Tag: v$Version"
+    Write-Host "Setup-Datei: $DefaultSetupPath"
+
+    $draft = Read-YesNo "Release als Draft erstellen?"
+    $prerelease = Read-YesNo "Release als Pre-Release markieren?"
+
+    [pscustomobject]@{
+        Title = $title
+        Notes = $notes
+        SetupPath = $setup
+        Draft = $draft
+        Prerelease = $prerelease
+    }
+}
+
+function Invoke-GitHubReleaseSetup {
+    if ($Action -eq "Pull") {
+        throw "-ReleaseSetup ist nur mit -Action Push oder PullPush sinnvoll."
+    }
+
+    $script:GitHubCliCommand = Ensure-GitHubCli
+    Ensure-GitHubCliAuthentication
+
+    $version = Get-AppVersion
+    $tag = "v$version"
+    $defaultSetup = Join-Path $repoRoot "artifacts\installer\Schreibkraft-Setup-$version.exe"
+    $options = Get-ReleaseOptions -Version $version -DefaultSetupPath $defaultSetup
+    $setup = $options.SetupPath
+
+    if (-not (Test-Path -LiteralPath $setup)) {
+        throw "Setup-Datei wurde nicht gefunden: $setup`nVorher .\Build.ps1 ausführen."
+    }
+
+    if (Test-GitHubReleaseExists -Tag $tag) {
+        if (-not (Read-YesNo "GitHub Release $tag existiert bereits. Setup-Asset überschreiben?")) {
+            throw "GitHub Release $tag existiert bereits. Version erhöhen oder Überschreiben bestätigen."
+        }
+
+        $head = (& git -C $repoRoot rev-parse HEAD).Trim()
+        Invoke-RepoGit @("tag", "-f", $tag, $head)
+        Invoke-RepoGit @("push", "origin", $tag, "--force")
+        Write-Host "GitHub Release $tag existiert - lade Setup-Asset neu hoch."
+        & $script:GitHubCliCommand release upload $tag $setup --clobber
+        if ($LASTEXITCODE -ne 0) {
+            throw "gh release upload ist fehlgeschlagen."
+        }
+        return
+    }
+
+    $head = (& git -C $repoRoot rev-parse HEAD).Trim()
+    Invoke-RepoGit @("tag", "-f", $tag, $head)
+    Invoke-RepoGit @("push", "origin", $tag, "--force")
+
+    $args = @("release", "create", $tag, $setup, "--title", $options.Title, "--notes", $options.Notes, "--target", $syncBranch)
+    if ($options.Draft) {
+        $args += "--draft"
+    }
+    if ($options.Prerelease) {
+        $args += "--prerelease"
+    }
+
+    Write-Host ("gh " + ($args -join " "))
+    & $script:GitHubCliCommand @args
+    if ($LASTEXITCODE -ne 0) {
+        throw "gh release create ist fehlgeschlagen."
+    }
+}
+
 Assert-GitRepo
 Ensure-Origin -Url $OriginUrl
 Ensure-TargetBranch
 Show-Context
+
+if ($Action -in @("Push", "PullPush")) {
+    Invoke-AutoCommitLocalChanges
+}
 
 switch ($Action) {
     "Pull" {
@@ -246,6 +570,10 @@ switch ($Action) {
 
         Invoke-RepoPush -ForceWithLease:$PushForceWithLease
     }
+}
+
+if ($ReleaseSetup) {
+    Invoke-GitHubReleaseSetup
 }
 
 Write-Host "Fertig ($Action)."

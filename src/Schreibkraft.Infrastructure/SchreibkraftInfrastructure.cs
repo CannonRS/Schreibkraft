@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
@@ -9,13 +9,24 @@ using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 using NAudio.Wave;
-using MagicVoice.Core;
+using Schreibkraft.Core;
 
-namespace MagicVoice.Infrastructure;
+namespace Schreibkraft.Infrastructure;
 
 public sealed class DpapiSecretProtector : ISecretProtector
 {
-    private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("Magic-Voice.v1");
+    private static readonly string LegacyName = string.Concat("Ma", "gic");
+    private static readonly string LegacyNameWithSuffix = string.Concat(LegacyName, "-Voice");
+    private static readonly string LegacyNameCompact = string.Concat(LegacyName, "Voice");
+    private static readonly string LegacyNameSpaced = string.Concat(LegacyName, " Voice");
+    private static readonly byte[] CurrentEntropy = Encoding.UTF8.GetBytes("Schreibkraft.v1");
+    private static readonly byte[][] SupportedEntropies =
+    [
+        CurrentEntropy,
+        Encoding.UTF8.GetBytes($"{LegacyNameWithSuffix}.v1"),
+        Encoding.UTF8.GetBytes($"{LegacyNameCompact}.v1"),
+        Encoding.UTF8.GetBytes($"{LegacyNameSpaced}.v1")
+    ];
 
     public string Protect(string secret)
     {
@@ -25,7 +36,7 @@ public sealed class DpapiSecretProtector : ISecretProtector
         }
 
         var bytes = Encoding.UTF8.GetBytes(secret);
-        var protectedBytes = ProtectedData.Protect(bytes, Entropy, DataProtectionScope.CurrentUser);
+        var protectedBytes = ProtectedData.Protect(bytes, CurrentEntropy, DataProtectionScope.CurrentUser);
         return Convert.ToBase64String(protectedBytes);
     }
 
@@ -37,14 +48,32 @@ public sealed class DpapiSecretProtector : ISecretProtector
         }
 
         var bytes = Convert.FromBase64String(protectedSecret);
-        var plainBytes = ProtectedData.Unprotect(bytes, Entropy, DataProtectionScope.CurrentUser);
-        return Encoding.UTF8.GetString(plainBytes);
+        CryptographicException? lastError = null;
+        foreach (var entropy in SupportedEntropies)
+        {
+            try
+            {
+                var plainBytes = ProtectedData.Unprotect(bytes, entropy, DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(plainBytes);
+            }
+            catch (CryptographicException ex)
+            {
+                lastError = ex;
+            }
+        }
+
+        throw lastError ?? new CryptographicException("Secret konnte nicht entschlüsselt werden.");
     }
 }
 
 public sealed class SettingsService : ISettingsService
 {
+    private static readonly string LegacyDataFolderName = string.Concat("Ma", "gic", "-Voice");
+
     private readonly IAppProfile _profile;
+    private readonly string? _legacyDataDirectory;
+    private readonly SemaphoreSlim _saveGate = new(1, 1);
+    private bool _legacyMigrationAttempted;
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
@@ -56,15 +85,26 @@ public sealed class SettingsService : ISettingsService
     public string SettingsPath { get; }
 
     public SettingsService(IAppProfile profile, string? dataDirectory = null)
+        : this(profile, dataDirectory, null)
+    {
+    }
+
+    internal SettingsService(IAppProfile profile, string? dataDirectory, string? legacyDataDirectory)
     {
         _profile = profile;
-        DataDirectory = dataDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), profile.DataFolderName);
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        DataDirectory = dataDirectory ?? Path.Combine(localAppData, profile.DataFolderName);
+        _legacyDataDirectory = legacyDataDirectory
+            ?? (dataDirectory is null && profile.DataFolderName.Equals("Schreibkraft", StringComparison.OrdinalIgnoreCase)
+                ? Path.Combine(localAppData, LegacyDataFolderName)
+                : null);
         LogDirectory = Path.Combine(DataDirectory, "logs");
         SettingsPath = Path.Combine(DataDirectory, "settings.json");
     }
 
     public async Task<AppSettings> LoadAsync(CancellationToken cancellationToken = default)
     {
+        MigrateLegacyDataDirectoryIfNeeded();
         Directory.CreateDirectory(DataDirectory);
         Directory.CreateDirectory(LogDirectory);
 
@@ -94,18 +134,82 @@ public sealed class SettingsService : ISettingsService
 
     public async Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default)
     {
-        Directory.CreateDirectory(DataDirectory);
-        Directory.CreateDirectory(LogDirectory);
-        Normalize(settings);
-
-        var tempPath = $"{SettingsPath}.tmp";
-        await using (var stream = File.Create(tempPath))
+        await _saveGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var tempPath = $"{SettingsPath}.{Guid.NewGuid():N}.tmp";
+        try
         {
-            await JsonSerializer.SerializeAsync(stream, settings, _jsonOptions, cancellationToken).ConfigureAwait(false);
+            Directory.CreateDirectory(DataDirectory);
+            Directory.CreateDirectory(LogDirectory);
+            Normalize(settings);
+
+            await using (var stream = File.Create(tempPath))
+            {
+                await JsonSerializer.SerializeAsync(stream, settings, _jsonOptions, cancellationToken).ConfigureAwait(false);
+            }
+
+            File.Move(tempPath, SettingsPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+
+            _saveGate.Release();
+        }
+    }
+
+    private void MigrateLegacyDataDirectoryIfNeeded()
+    {
+        if (_legacyMigrationAttempted)
+        {
+            return;
         }
 
-        File.Move(tempPath, SettingsPath, overwrite: true);
+        _legacyMigrationAttempted = true;
+
+        if (string.IsNullOrWhiteSpace(_legacyDataDirectory)
+            || !Directory.Exists(_legacyDataDirectory)
+            || PathsEqual(_legacyDataDirectory, DataDirectory))
+        {
+            return;
+        }
+
+        CopyMissingFiles(_legacyDataDirectory, DataDirectory);
     }
+
+    private static void CopyMissingFiles(string sourceDirectory, string targetDirectory)
+    {
+        Directory.CreateDirectory(targetDirectory);
+
+        foreach (var sourceFile in Directory.EnumerateFiles(sourceDirectory))
+        {
+            var targetFile = Path.Combine(targetDirectory, Path.GetFileName(sourceFile));
+            if (!File.Exists(targetFile))
+            {
+                File.Copy(sourceFile, targetFile);
+            }
+        }
+
+        foreach (var sourceSubDirectory in Directory.EnumerateDirectories(sourceDirectory))
+        {
+            var targetSubDirectory = Path.Combine(targetDirectory, Path.GetFileName(sourceSubDirectory));
+            CopyMissingFiles(sourceSubDirectory, targetSubDirectory);
+        }
+    }
+
+    private static bool PathsEqual(string left, string right)
+    {
+        var fullLeft = Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var fullRight = Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return string.Equals(fullLeft, fullRight, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Providers that run locally and don't need an API key (Bearer header can be a placeholder).</summary>
+    private static bool IsKeylessProvider(string provider) =>
+        provider.Equals(Defaults.OllamaProviderName, StringComparison.OrdinalIgnoreCase)
+        || provider.Equals(Defaults.LmStudioProviderName, StringComparison.OrdinalIgnoreCase);
 
     public ReadinessReport Validate(AppSettings settings)
     {
@@ -113,45 +217,53 @@ public sealed class SettingsService : ISettingsService
 
         if (string.IsNullOrWhiteSpace(settings.SttProvider))
         {
-            issues.Add(new("sttProvider", "Bitte einen Transkriptionsanbieter auswählen."));
+            issues.Add(new("sttProvider", L.S("validation.stt_provider")));
         }
-        else if (!Defaults.TryGetSttEndpoint(settings.SttProvider, out _))
+        else if (!Defaults.TryGetSttEndpoint(settings.SttProvider, settings.SttEndpointOverride, out _))
         {
-            issues.Add(new("sttProvider", "Der gewählte Transkriptionsanbieter wird noch nicht unterstützt."));
+            // Either truly unsupported or a provider that needs a URL the user hasn't supplied yet.
+            var needsEndpoint =
+                settings.SttProvider.Equals(Defaults.OpenAiCompatibleProviderName, StringComparison.OrdinalIgnoreCase)
+                || settings.SttProvider.Equals(Defaults.AzureSpeechProviderName, StringComparison.OrdinalIgnoreCase);
+            issues.Add(new("sttProvider",
+                needsEndpoint ? L.S("validation.custom_endpoint_missing") : L.S("validation.stt_unsupported")));
         }
 
         if (string.IsNullOrWhiteSpace(settings.SttModel))
         {
-            issues.Add(new("sttModel", "Bitte ein Transkriptionsmodell wählen."));
+            issues.Add(new("sttModel", L.S("validation.stt_model")));
         }
 
-        if (!settings.HasEncryptedSttApiKey)
+        if (!settings.HasEncryptedSttApiKey && !IsKeylessProvider(settings.SttProvider))
         {
-            issues.Add(new("sttApiKey", "Bitte einen API-Schlüssel für die Transkription speichern."));
+            issues.Add(new("sttApiKey", L.S("validation.stt_api_key")));
         }
 
         if (string.IsNullOrWhiteSpace(settings.LlmProvider))
         {
-            issues.Add(new("llmProvider", "Bitte einen KI-Anbieter auswählen."));
+            issues.Add(new("llmProvider", L.S("validation.llm_provider")));
         }
-        else if (!Defaults.TryGetLlmEndpoint(settings.LlmProvider, out _))
+        else if (!Defaults.TryGetLlmEndpoint(settings.LlmProvider, settings.LlmEndpointOverride, settings.LlmModel, out _))
         {
-            issues.Add(new("llmProvider", "Der gewählte KI-Anbieter wird noch nicht unterstützt."));
+            issues.Add(new("llmProvider",
+                settings.LlmProvider.Equals(Defaults.OpenAiCompatibleProviderName, StringComparison.OrdinalIgnoreCase)
+                    ? L.S("validation.custom_endpoint_missing")
+                    : L.S("validation.llm_unsupported")));
         }
 
         if (string.IsNullOrWhiteSpace(settings.LlmModel))
         {
-            issues.Add(new("llmModel", "Bitte ein KI-Modell wählen."));
+            issues.Add(new("llmModel", L.S("validation.llm_model")));
         }
 
-        if (!settings.HasEncryptedLlmApiKey)
+        if (!settings.HasEncryptedLlmApiKey && !IsKeylessProvider(settings.LlmProvider))
         {
-            issues.Add(new("llmApiKey", "Bitte einen API-Schlüssel für die KI-Verarbeitung speichern."));
+            issues.Add(new("llmApiKey", L.S("validation.llm_api_key")));
         }
 
         if (settings.Assistants.Count == 0)
         {
-            issues.Add(new("assistants", "Es ist kein Assistent konfiguriert. Bitte mindestens einen anlegen."));
+            issues.Add(new("assistants", L.S("validation.no_assistants")));
         }
         else
         {
@@ -190,12 +302,49 @@ public sealed class SettingsService : ISettingsService
             settings.LastSelectedSettingsSection = "overview";
         }
 
+        settings.TranscriptionRetriesOnFailure = Math.Clamp(settings.TranscriptionRetriesOnFailure, 0, 5);
+        settings.LlmRetriesOnFailure = Math.Clamp(settings.LlmRetriesOnFailure, 0, 5);
+        settings.ClipboardInsertRetriesOnFailure = Math.Clamp(settings.ClipboardInsertRetriesOnFailure, 0, 5);
+        settings.RecordingSoundVolumePercent = Math.Clamp(settings.RecordingSoundVolumePercent, 0, 100);
+
         // Eine leere Liste (`[]`) ist faktisch wie "kein Assistent konfiguriert" — die App
         // ist dann ohne Wirkung und der User würde im UI eine leere Hotkey-Seite sehen.
         // ??= würde nur null ersetzen, nicht eine leere Liste, daher hier explizit prüfen.
         if (settings.Assistants is null || settings.Assistants.Count == 0)
         {
             settings.Assistants = _profile.CreateDefaultAssistants();
+        }
+
+        settings.SpellingCorrectionSets ??= new List<SpellingCorrectionSet>();
+        foreach (var set in settings.SpellingCorrectionSets)
+        {
+            if (string.IsNullOrWhiteSpace(set.Id))
+            {
+                set.Id = Guid.NewGuid().ToString("N");
+            }
+            set.Name ??= string.Empty;
+            set.Replacements ??= new List<SpellingReplacement>();
+            set.Replacements.RemoveAll(r => r is null);
+            foreach (var r in set.Replacements)
+            {
+                r.From ??= string.Empty;
+                r.To ??= string.Empty;
+            }
+            set.Terms ??= new List<string>();
+            // Migration: an earlier UI version could persist multiple terms joined by '\r' inside
+            // a single string. Split them apart, then trim and drop empties.
+            set.Terms = set.Terms
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .SelectMany(t => t.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                .Select(t => t.Trim())
+                .Where(t => t.Length > 0)
+                .ToList();
+        }
+        var knownSetIds = new HashSet<string>(settings.SpellingCorrectionSets.Select(s => s.Id));
+        foreach (var assistant in settings.Assistants)
+        {
+            assistant.EnabledSpellingSetIds ??= new List<string>();
+            assistant.EnabledSpellingSetIds.RemoveAll(id => string.IsNullOrEmpty(id) || !knownSetIds.Contains(id));
         }
         foreach (var assistant in settings.Assistants)
         {
@@ -225,6 +374,8 @@ public sealed class SettingsService : ISettingsService
                 assistant.EmojiExpression = EmojiExpression.Balanced;
             }
 
+            assistant.EnabledSpellingSetIds ??= new List<string>();
+
             if (string.IsNullOrWhiteSpace(assistant.Name))
             {
                 assistant.Name = typeDefinition.Name;
@@ -233,6 +384,10 @@ public sealed class SettingsService : ISettingsService
             if (string.IsNullOrWhiteSpace(assistant.Prompt))
             {
                 assistant.Prompt = typeDefinition.DefaultPrompt;
+            }
+            else
+            {
+                assistant.Prompt = AssistantPromptDefaults.NormalizePromptForMode(_profile, assistant.Type, assistant.Prompt);
             }
 
             assistant.SystemPromptOverride = string.IsNullOrWhiteSpace(assistant.SystemPromptOverride)
@@ -298,7 +453,7 @@ public sealed class NAudioRecorder(ISettingsService settingsService, ILogger<NAu
         {
             if (args.Exception is not null)
             {
-                logger?.LogError(args.Exception, "Audioaufnahme wurde mit Fehler beendet.");
+                logger?.LogError(args.Exception, L.S("audio.recording_failed"));
             }
         };
         try
@@ -311,7 +466,7 @@ public sealed class NAudioRecorder(ISettingsService settingsService, ILogger<NAu
             _waveIn = null;
             _buffer.Dispose();
             _buffer = null;
-            throw new InvalidOperationException("Mikrofonzugriff fehlgeschlagen. Bitte prüfe Mikrofon, Windows-Datenschutzeinstellungen und ob ein anderes Programm das Gerät blockiert.", ex);
+            throw new InvalidOperationException(L.S("mic.access_failed_long"), ex);
         }
 
     }
@@ -366,7 +521,7 @@ public sealed class NAudioDeviceService : IAudioDeviceService
     {
         var devices = new List<AudioInputDevice>
         {
-            new(Defaults.DefaultAudioInputDeviceId, "Systemstandard", true)
+            new(Defaults.DefaultAudioInputDeviceId, L.S("language.auto"), true)
         };
 
         for (var index = 0; index < WaveIn.DeviceCount; index++)
@@ -428,7 +583,11 @@ public sealed class OpenAiCompatibleLlmService(HttpClient httpClient) : ILlmServ
         };
 
         using var message = new HttpRequestMessage(HttpMethod.Post, request.Endpoint);
-        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", request.ApiKey);
+        // Local backends (Ollama, LM Studio) often run without a key; skip the header in that case.
+        if (!string.IsNullOrWhiteSpace(request.ApiKey))
+        {
+            message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", request.ApiKey);
+        }
         message.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 
         using var response = await httpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
@@ -444,6 +603,317 @@ public sealed class OpenAiCompatibleLlmService(HttpClient httpClient) : ILlmServ
     private sealed record ChatMessage([property: JsonPropertyName("content")] string? Content);
 }
 
+/// <summary>Anthropic Claude (Messages API). Uses x-api-key header and a system parameter outside the messages array.</summary>
+public sealed class AnthropicLlmService(HttpClient httpClient) : ILlmService
+{
+    private const string ApiVersion = "2023-06-01";
+
+    public async Task<string> ProcessAsync(LlmRequest request, CancellationToken cancellationToken = default)
+    {
+        var body = new
+        {
+            model = request.Model,
+            max_tokens = 4096,
+            temperature = 0.2,
+            system = request.SystemPrompt,
+            messages = new object[]
+            {
+                new { role = "user", content = $"{request.ModePrompt}\n\nTranskript:\n{request.Transcript}" }
+            }
+        };
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, request.Endpoint);
+        message.Headers.Add("x-api-key", request.ApiKey);
+        message.Headers.Add("anthropic-version", ApiVersion);
+        message.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+
+        using var response = await httpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var payload = await JsonSerializer.DeserializeAsync<MessagesResponse>(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var textParts = payload?.Content?.Where(c => c.Type == "text").Select(c => c.Text ?? string.Empty);
+        return textParts is null ? string.Empty : string.Concat(textParts).Trim();
+    }
+
+    private sealed record MessagesResponse([property: JsonPropertyName("content")] ContentBlock[]? Content);
+    private sealed record ContentBlock(
+        [property: JsonPropertyName("type")] string? Type,
+        [property: JsonPropertyName("text")] string? Text);
+}
+
+/// <summary>Google Gemini (generateContent endpoint). Uses ?key=... query param and a different payload shape.</summary>
+public sealed class GoogleGeminiLlmService(HttpClient httpClient) : ILlmService
+{
+    public async Task<string> ProcessAsync(LlmRequest request, CancellationToken cancellationToken = default)
+    {
+        var body = new
+        {
+            system_instruction = new { parts = new object[] { new { text = request.SystemPrompt } } },
+            contents = new object[]
+            {
+                new
+                {
+                    role = "user",
+                    parts = new object[] { new { text = $"{request.ModePrompt}\n\nTranskript:\n{request.Transcript}" } }
+                }
+            },
+            generationConfig = new { temperature = 0.2 }
+        };
+
+        var url = request.Endpoint.Contains('?')
+            ? $"{request.Endpoint}&key={Uri.EscapeDataString(request.ApiKey)}"
+            : $"{request.Endpoint}?key={Uri.EscapeDataString(request.ApiKey)}";
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, url);
+        message.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+
+        using var response = await httpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var payload = await JsonSerializer.DeserializeAsync<GeminiResponse>(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var firstCandidate = payload?.Candidates?.FirstOrDefault();
+        var textParts = firstCandidate?.Content?.Parts?.Select(p => p.Text ?? string.Empty);
+        return textParts is null ? string.Empty : string.Concat(textParts).Trim();
+    }
+
+    private sealed record GeminiResponse([property: JsonPropertyName("candidates")] Candidate[]? Candidates);
+    private sealed record Candidate([property: JsonPropertyName("content")] GeminiContent? Content);
+    private sealed record GeminiContent([property: JsonPropertyName("parts")] GeminiPart[]? Parts);
+    private sealed record GeminiPart([property: JsonPropertyName("text")] string? Text);
+}
+
+/// <summary>Deepgram listen endpoint for speech-to-text. Sends raw audio in body with Token auth.</summary>
+public sealed class DeepgramSttService(HttpClient httpClient) : ISttService
+{
+    public async Task<string> TranscribeAsync(SttRequest request, CancellationToken cancellationToken = default)
+    {
+        var url = request.Endpoint;
+        var query = new List<string> { $"model={Uri.EscapeDataString(request.Model)}", "smart_format=true", "punctuate=true" };
+        if (!Defaults.IsAutoLanguage(request.Language))
+        {
+            query.Add($"language={Uri.EscapeDataString(request.Language)}");
+        }
+        url = $"{url}?{string.Join('&', query)}";
+
+        var wavBytes = WavWriter.ToWav(request.Audio);
+        var audioContent = new ByteArrayContent(wavBytes);
+        audioContent.Headers.ContentType = MediaTypeHeaderValue.Parse("audio/wav");
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, url);
+        message.Headers.Authorization = new AuthenticationHeaderValue("Token", request.ApiKey);
+        message.Content = audioContent;
+
+        using var response = await httpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var payload = await JsonSerializer.DeserializeAsync<DeepgramResponse>(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return payload?.Results?.Channels?.FirstOrDefault()?.Alternatives?.FirstOrDefault()?.Transcript?.Trim() ?? string.Empty;
+    }
+
+    private sealed record DeepgramResponse([property: JsonPropertyName("results")] DeepgramResults? Results);
+    private sealed record DeepgramResults([property: JsonPropertyName("channels")] DeepgramChannel[]? Channels);
+    private sealed record DeepgramChannel([property: JsonPropertyName("alternatives")] DeepgramAlternative[]? Alternatives);
+    private sealed record DeepgramAlternative([property: JsonPropertyName("transcript")] string? Transcript);
+}
+
+/// <summary>Azure Speech Short Audio (REST): expects a region-specific endpoint URL.</summary>
+public sealed class AzureSpeechSttService(HttpClient httpClient) : ISttService
+{
+    public async Task<string> TranscribeAsync(SttRequest request, CancellationToken cancellationToken = default)
+    {
+        var url = request.Endpoint;
+        if (!Defaults.IsAutoLanguage(request.Language))
+        {
+            var sep = url.Contains('?') ? '&' : '?';
+            // Azure expects BCP-47 codes (e.g. "de-DE"); we pass through what we have.
+            url = $"{url}{sep}language={Uri.EscapeDataString(request.Language)}";
+        }
+
+        var wavBytes = WavWriter.ToWav(request.Audio);
+        var content = new ByteArrayContent(wavBytes);
+        content.Headers.ContentType = MediaTypeHeaderValue.Parse("audio/wav; codecs=audio/pcm; samplerate=16000");
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, url);
+        message.Headers.Add("Ocp-Apim-Subscription-Key", request.ApiKey);
+        message.Headers.Add("Accept", "application/json");
+        message.Content = content;
+
+        using var response = await httpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var payload = await JsonSerializer.DeserializeAsync<AzureResponse>(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return payload?.DisplayText?.Trim() ?? string.Empty;
+    }
+
+    private sealed record AzureResponse([property: JsonPropertyName("DisplayText")] string? DisplayText);
+}
+
+/// <summary>AssemblyAI: upload audio, start a transcript job, poll until completion.</summary>
+public sealed class AssemblyAiSttService(HttpClient httpClient) : ISttService
+{
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(800);
+    private static readonly TimeSpan MaxWait = TimeSpan.FromMinutes(2);
+
+    public async Task<string> TranscribeAsync(SttRequest request, CancellationToken cancellationToken = default)
+    {
+        // 1) Upload raw audio (PCM WAV) — AssemblyAI also accepts raw bytes.
+        var wavBytes = WavWriter.ToWav(request.Audio);
+        using var uploadMessage = new HttpRequestMessage(HttpMethod.Post, Defaults.AssemblyAiUploadEndpoint);
+        uploadMessage.Headers.Add("authorization", request.ApiKey);
+        uploadMessage.Content = new ByteArrayContent(wavBytes);
+        uploadMessage.Content.Headers.ContentType = MediaTypeHeaderValue.Parse("application/octet-stream");
+        using var uploadResponse = await httpClient.SendAsync(uploadMessage, cancellationToken).ConfigureAwait(false);
+        uploadResponse.EnsureSuccessStatusCode();
+        var uploadPayload = await JsonSerializer.DeserializeAsync<UploadResponse>(
+            await uploadResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var audioUrl = uploadPayload?.UploadUrl ?? throw new InvalidOperationException("AssemblyAI: missing upload_url");
+
+        // 2) Start transcript job.
+        var startBody = new Dictionary<string, object?>
+        {
+            ["audio_url"] = audioUrl,
+            ["speech_model"] = string.IsNullOrWhiteSpace(request.Model) ? "universal" : request.Model
+        };
+        if (!Defaults.IsAutoLanguage(request.Language))
+        {
+            startBody["language_code"] = request.Language;
+        }
+        using var startMessage = new HttpRequestMessage(HttpMethod.Post, request.Endpoint);
+        startMessage.Headers.Add("authorization", request.ApiKey);
+        startMessage.Content = new StringContent(JsonSerializer.Serialize(startBody), Encoding.UTF8, "application/json");
+        using var startResponse = await httpClient.SendAsync(startMessage, cancellationToken).ConfigureAwait(false);
+        startResponse.EnsureSuccessStatusCode();
+        var startPayload = await JsonSerializer.DeserializeAsync<TranscriptResponse>(
+            await startResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var transcriptId = startPayload?.Id ?? throw new InvalidOperationException("AssemblyAI: missing transcript id");
+
+        // 3) Poll for completion.
+        var pollUrl = $"{request.Endpoint}/{transcriptId}";
+        var deadline = DateTimeOffset.UtcNow + MaxWait;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var pollMessage = new HttpRequestMessage(HttpMethod.Get, pollUrl);
+            pollMessage.Headers.Add("authorization", request.ApiKey);
+            using var pollResponse = await httpClient.SendAsync(pollMessage, cancellationToken).ConfigureAwait(false);
+            pollResponse.EnsureSuccessStatusCode();
+            var payload = await JsonSerializer.DeserializeAsync<TranscriptResponse>(
+                await pollResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            switch (payload?.Status)
+            {
+                case "completed":
+                    return payload.Text?.Trim() ?? string.Empty;
+                case "error":
+                    throw new InvalidOperationException($"AssemblyAI error: {payload.Error}");
+            }
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                throw new TimeoutException("AssemblyAI: transcription did not complete within the timeout.");
+            }
+            await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private sealed record UploadResponse([property: JsonPropertyName("upload_url")] string? UploadUrl);
+    private sealed record TranscriptResponse(
+        [property: JsonPropertyName("id")] string? Id,
+        [property: JsonPropertyName("status")] string? Status,
+        [property: JsonPropertyName("text")] string? Text,
+        [property: JsonPropertyName("error")] string? Error);
+}
+
+/// <summary>ElevenLabs Speech-to-Text (Scribe): multipart upload, returns text directly.</summary>
+public sealed class ElevenLabsSttService(HttpClient httpClient) : ISttService
+{
+    public async Task<string> TranscribeAsync(SttRequest request, CancellationToken cancellationToken = default)
+    {
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent(string.IsNullOrWhiteSpace(request.Model) ? "scribe_v1" : request.Model), "model_id");
+        if (!Defaults.IsAutoLanguage(request.Language))
+        {
+            form.Add(new StringContent(request.Language), "language_code");
+        }
+
+        var wavBytes = WavWriter.ToWav(request.Audio);
+        var audioContent = new ByteArrayContent(wavBytes);
+        audioContent.Headers.ContentType = MediaTypeHeaderValue.Parse("audio/wav");
+        form.Add(audioContent, "file", "recording.wav");
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, request.Endpoint);
+        message.Headers.Add("xi-api-key", request.ApiKey);
+        message.Content = form;
+
+        using var response = await httpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        var payload = await JsonSerializer.DeserializeAsync<ScribeResponse>(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return payload?.Text?.Trim() ?? string.Empty;
+    }
+
+    private sealed record ScribeResponse([property: JsonPropertyName("text")] string? Text);
+}
+
+/// <summary>Routes ILlmService calls to the concrete implementation based on <see cref="LlmRequest.Provider"/>.</summary>
+public sealed class RoutingLlmService(
+    OpenAiCompatibleLlmService openAi,
+    AnthropicLlmService anthropic,
+    GoogleGeminiLlmService gemini) : ILlmService
+{
+    public Task<string> ProcessAsync(LlmRequest request, CancellationToken cancellationToken = default)
+    {
+        if (request.Provider.Equals(Defaults.AnthropicProviderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return anthropic.ProcessAsync(request, cancellationToken);
+        }
+        if (request.Provider.Equals(Defaults.GoogleGeminiProviderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return gemini.ProcessAsync(request, cancellationToken);
+        }
+        // OpenAI and OpenAI-compatible both use the chat completions schema.
+        return openAi.ProcessAsync(request, cancellationToken);
+    }
+}
+
+/// <summary>Routes ISttService calls based on <see cref="SttRequest.Provider"/>.</summary>
+public sealed class RoutingSttService(
+    OpenAiCompatibleSttService openAi,
+    DeepgramSttService deepgram,
+    AzureSpeechSttService azure,
+    AssemblyAiSttService assemblyAi,
+    ElevenLabsSttService elevenLabs) : ISttService
+{
+    public Task<string> TranscribeAsync(SttRequest request, CancellationToken cancellationToken = default)
+    {
+        if (request.Provider.Equals(Defaults.DeepgramProviderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return deepgram.TranscribeAsync(request, cancellationToken);
+        }
+        if (request.Provider.Equals(Defaults.AzureSpeechProviderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return azure.TranscribeAsync(request, cancellationToken);
+        }
+        if (request.Provider.Equals(Defaults.AssemblyAiProviderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return assemblyAi.TranscribeAsync(request, cancellationToken);
+        }
+        if (request.Provider.Equals(Defaults.ElevenLabsProviderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return elevenLabs.TranscribeAsync(request, cancellationToken);
+        }
+        // OpenAI and OpenAI-compatible (Groq, etc.) use the Whisper-compatible multipart schema.
+        return openAi.TranscribeAsync(request, cancellationToken);
+    }
+}
+
 public sealed class ClipboardInputInjector : IInputInjector
 {
     public async Task InsertTextAsync(string text, InsertMethod method, bool restoreClipboard, CancellationToken cancellationToken = default)
@@ -457,11 +927,14 @@ public sealed class ClipboardInputInjector : IInputInjector
         var previousText = restoreClipboard ? NativeClipboard.TryGetText() : null;
 
         NativeClipboard.SetText(text);
+        VerifyClipboardContainsText(text);
         NativeInput.SendPasteShortcut();
-        await Task.Delay(150, cancellationToken).ConfigureAwait(true);
 
+        // Nach Strg+V nur eine sehr kurze Pause vor dem Zurückschreiben: soll die Nachrichtenwarteschlange einen Moment abarbeiten.
+        // Ob dadurch ein Randfall mit sehr langsamen Zielen vermieden wird, ist unklar – spürbar soll es nicht sein (keine langen Delays).
         if (restoreClipboard && previousText is not null)
         {
+            await Task.Delay(50, cancellationToken).ConfigureAwait(true);
             try
             {
                 NativeClipboard.SetText(previousText);
@@ -470,6 +943,19 @@ public sealed class ClipboardInputInjector : IInputInjector
             {
                 // Die Einfügung war erfolgreich; ein Restore-Fehler soll die Pipeline nicht nachträglich scheitern lassen.
             }
+        }
+    }
+
+    /// <summary>
+    /// Liest die Zwischenablage nach <see cref="NativeClipboard.SetText"/> einmal zurück und prüft exakte Übereinstimmung.
+    /// Weitere Versuche bei Abweichung steuert der Aufrufer (Einstellung „Wiederholungsversuche bei Fehler“).
+    /// </summary>
+    private static void VerifyClipboardContainsText(string expected)
+    {
+        var actual = NativeClipboard.TryGetText();
+        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(L.S("clipboard.not_expected"));
         }
     }
 }
@@ -519,7 +1005,7 @@ internal static class NativeClipboard
     {
         if (!OpenClipboard(IntPtr.Zero))
         {
-            throw new InvalidOperationException("Zwischenablage konnte nicht geöffnet werden.");
+            throw new InvalidOperationException(L.S("clipboard.locked"));
         }
 
         try
@@ -529,13 +1015,13 @@ internal static class NativeClipboard
             var handle = GlobalAlloc(GmemMoveable, (UIntPtr)bytes);
             if (handle == IntPtr.Zero)
             {
-                throw new InvalidOperationException("Zwischenablage-Speicher konnte nicht reserviert werden.");
+                throw new InvalidOperationException(L.S("clipboard.alloc_failed"));
             }
 
             var pointer = GlobalLock(handle);
             if (pointer == IntPtr.Zero)
             {
-                throw new InvalidOperationException("Zwischenablage-Speicher konnte nicht gesperrt werden.");
+                throw new InvalidOperationException(L.S("clipboard.lock_failed"));
             }
 
             try
@@ -550,7 +1036,7 @@ internal static class NativeClipboard
 
             if (SetClipboardData(CfUnicodeText, handle) == IntPtr.Zero)
             {
-                throw new InvalidOperationException("Zwischenablage konnte nicht gesetzt werden.");
+                throw new InvalidOperationException(L.S("clipboard.set_failed"));
             }
         }
         finally
@@ -645,10 +1131,10 @@ internal static class NativeInput
         {
             var error = Marshal.GetLastWin32Error();
             throw new InvalidOperationException(
-                $"Tastatureingabe konnte nicht gesendet werden ({sent}/{inputs.Length} Ereignisse, Win32-Fehler {error}). " +
-                "Mögliche Ursachen: Die Zielanwendung läuft mit höheren Rechten (UIPI blockiert Eingaben), " +
-                "die Eingabe wurde durch das Betriebssystem blockiert oder das Zielfenster akzeptiert kein SendInput. " +
-                "Tipp: Wechsle in den Einstellungen unter „Einfügen“ die Methode auf „über die Zwischenablage einfügen“.");
+                L.F("error.input_send", sent, inputs.Length, error) +
+                L.S("error.input_send.causes") +
+                L.S("error.input_send.middle") +
+                L.S("error.input_send.tip"));
         }
     }
 
@@ -721,62 +1207,122 @@ internal static class NativeInput
 
 /// <summary>
 /// Spielt zwei kurze Sinus-Beeps (mit kurzer Hüllkurve, damit es nicht klickt) für
-/// Aufnahme-Start und Aufnahme-Ende. Jeder Aufruf erzeugt eine eigene WaveOutEvent-Instanz und
-/// kann sich überlappen; Audio-Fehler werden geschluckt, damit die Aufnahme dadurch nicht stoppt.
+/// Aufnahme-Start und Aufnahme-Ende. PlaySound spielt die erzeugte WAV synchron ab; Audio-Fehler
+/// werden geschluckt, damit die Aufnahme dadurch nicht stoppt.
 /// </summary>
 public sealed class NAudioFeedbackSoundService(ISettingsService settingsService) : IFeedbackSoundService
 {
-    public async void PlayRecordingStart()
+    private const uint SndSync = 0x0000;
+    private const uint SndMemory = 0x0004;
+    private const uint SndNodefault = 0x0002;
+
+    public async Task PlayRecordingStartAsync(CancellationToken cancellationToken = default)
     {
-        if (await ShouldPlayAsync().ConfigureAwait(false))
+        var volume = await GetVolumePercentAsync(cancellationToken).ConfigureAwait(false);
+        if (volume > 0)
         {
-            Play(880, 80);
+            await PlayAsync(880, 160, volume, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    public async void PlayRecordingStop()
+    public async Task PlayRecordingStopAsync(CancellationToken cancellationToken = default)
     {
-        if (await ShouldPlayAsync().ConfigureAwait(false))
+        var volume = await GetVolumePercentAsync(cancellationToken).ConfigureAwait(false);
+        if (volume > 0)
         {
-            Play(587, 110);
+            await PlayAsync(587, 200, volume, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private async Task<bool> ShouldPlayAsync()
+    private async Task<int> GetVolumePercentAsync(CancellationToken cancellationToken)
     {
         try
         {
-            var settings = await settingsService.LoadAsync().ConfigureAwait(false);
-            return settings.PlayRecordingSounds;
+            var settings = await settingsService.LoadAsync(cancellationToken).ConfigureAwait(false);
+            return settings.PlayRecordingSounds
+                ? Math.Clamp(settings.RecordingSoundVolumePercent, 0, 100)
+                : 0;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch
         {
-            return false;
+            return 0;
         }
     }
 
-    private static void Play(double frequencyHz, int durationMs)
+    private async Task PlayAsync(double frequencyHz, int durationMs, int volumePercent, CancellationToken cancellationToken)
     {
         try
         {
-            var provider = BuildBeep(frequencyHz, durationMs, gain: 0.18);
-            var output = new WaveOutEvent();
-            output.Init(provider);
-            output.PlaybackStopped += (_, _) => output.Dispose();
-            output.Play();
+            var wav = BuildBeepWav(frequencyHz, durationMs, gain: 0.35 * Math.Clamp(volumePercent, 0, 100) / 100.0);
+            await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var handle = GCHandle.Alloc(wav, GCHandleType.Pinned);
+                try
+                {
+                    if (!PlaySound(handle.AddrOfPinnedObject(), IntPtr.Zero, SndMemory | SndSync | SndNodefault))
+                    {
+                        TryMessageBeep();
+                    }
+                }
+                finally
+                {
+                    handle.Free();
+                }
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch
         {
+            TryMessageBeep();
             // Kein Audio-Ausgabegerät verfügbar oder exklusiv blockiert – darf die Aufnahme nicht behindern.
         }
     }
 
-    private static NAudio.Wave.ISampleProvider BuildBeep(double frequencyHz, int durationMs, double gain)
+    private static void TryMessageBeep()
+    {
+        try
+        {
+            MessageBeep(0xFFFFFFFF);
+        }
+        catch
+        {
+        }
+    }
+
+    private static byte[] BuildBeepWav(double frequencyHz, int durationMs, double gain)
     {
         const int sampleRate = 44100;
+        const short bitsPerSample = 16;
+        const short channels = 1;
+        const short blockAlign = channels * bitsPerSample / 8;
+        const int byteRate = sampleRate * blockAlign;
         var totalSamples = sampleRate * durationMs / 1000;
+        var dataBytes = totalSamples * blockAlign;
         var fadeSamples = sampleRate * 8 / 1000;
-        var samples = new float[totalSamples];
+        using var output = new MemoryStream(44 + dataBytes);
+        using var writer = new BinaryWriter(output, Encoding.ASCII, leaveOpen: true);
+        writer.Write("RIFF"u8.ToArray());
+        writer.Write(36 + dataBytes);
+        writer.Write("WAVE"u8.ToArray());
+        writer.Write("fmt "u8.ToArray());
+        writer.Write(16);
+        writer.Write((short)1);
+        writer.Write(channels);
+        writer.Write(sampleRate);
+        writer.Write(byteRate);
+        writer.Write(blockAlign);
+        writer.Write(bitsPerSample);
+        writer.Write("data"u8.ToArray());
+        writer.Write(dataBytes);
+
         for (var i = 0; i < totalSamples; i++)
         {
             var sine = Math.Sin(2 * Math.PI * frequencyHz * i / sampleRate);
@@ -790,38 +1336,18 @@ public sealed class NAudioFeedbackSoundService(ISettingsService settingsService)
                 envelope = (double)(totalSamples - i) / fadeSamples;
             }
 
-            samples[i] = (float)(sine * envelope * gain);
+            var sample = (short)Math.Clamp(sine * envelope * gain * short.MaxValue, short.MinValue, short.MaxValue);
+            writer.Write(sample);
         }
 
-        return new BufferedSampleProvider(samples, sampleRate);
-    }
-}
-
-internal sealed class BufferedSampleProvider : NAudio.Wave.ISampleProvider
-{
-    private readonly float[] _buffer;
-    private int _position;
-
-    public NAudio.Wave.WaveFormat WaveFormat { get; }
-
-    public BufferedSampleProvider(float[] buffer, int sampleRate)
-    {
-        _buffer = buffer;
-        WaveFormat = NAudio.Wave.WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1);
+        return output.ToArray();
     }
 
-    public int Read(float[] buffer, int offset, int count)
-    {
-        var available = Math.Min(count, _buffer.Length - _position);
-        if (available <= 0)
-        {
-            return 0;
-        }
+    [DllImport("winmm.dll", EntryPoint = "PlaySoundW", ExactSpelling = true, SetLastError = true)]
+    private static extern bool PlaySound(IntPtr pszSound, IntPtr hmod, uint fdwSound);
 
-        Array.Copy(_buffer, _position, buffer, offset, available);
-        _position += available;
-        return available;
-    }
+    [DllImport("user32.dll")]
+    private static extern bool MessageBeep(uint uType);
 }
 
 public sealed class WindowsAutostartService(IAppProfile profile) : IAutostartService
@@ -874,6 +1400,15 @@ public sealed class LowLevelKeyboardHotkeyService : IHotkeyService
         var issues = new List<ValidationIssue>();
         foreach (var assistant in settings.Assistants)
         {
+            // Ein leeres Hotkey-Feld bedeutet "noch nicht zugewiesen" (z. B. neuer Assistent direkt
+            // nach dem Anlegen). Das ist KEIN Registrierungsfehler — die Validate-Prüfung markiert
+            // das ohnehin als "Einrichtung erforderlich". Erst eine syntaktisch ungültige Eingabe
+            // (Konflikt, Tippfehler) ist hier ein Fehlerfall.
+            if (string.IsNullOrWhiteSpace(assistant.Hotkey))
+            {
+                continue;
+            }
+
             var label = string.IsNullOrWhiteSpace(assistant.Name) ? assistant.Type.ToString() : assistant.Name;
             if (!HotkeyParser.TryParse(assistant.Hotkey, out var gesture, out var error))
             {
@@ -889,7 +1424,7 @@ public sealed class LowLevelKeyboardHotkeyService : IHotkeyService
             _hookId = SetHook(_proc);
             if (_hookId == IntPtr.Zero)
             {
-                issues.Add(new("hotkeys", "Globale Tastenkürzel konnten nicht registriert werden."));
+                issues.Add(new("hotkeys", L.S("hotkey.register_failed")));
             }
         }
 

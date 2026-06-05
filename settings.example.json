@@ -5,7 +5,7 @@
   "outputLanguage": "same",
   "audioInputDeviceId": "default",
   "llmProvider": "OpenAI",
-  "llmModel": "gpt-4o",
+  "llmModel": "gpt-5.1",
   "recordingMaxSeconds": 60,
   "minimumRecordingMilliseconds": 300,
   "processingTimeoutSeconds": 45,
@@ -14,6 +14,7 @@
   "launchMinimizedToTray": true,
   "minimizeToTray": true,
   "playRecordingSounds": true,
+  "recordingSoundVolumePercent": 100,
   "showNotifications": true,
   "openSettingsOnConfigurationError": true
 }

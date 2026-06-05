@@ -1,8 +1,8 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\MagicVoice.Core\MagicVoice.Core.csproj" />
-    <ProjectReference Include="..\MagicVoice.Infrastructure\MagicVoice.Infrastructure.csproj" />
+    <ProjectReference Include="..\Schreibkraft.Core\Schreibkraft.Core.csproj" />
+    <ProjectReference Include="..\Schreibkraft.Infrastructure\Schreibkraft.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -10,6 +10,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.7" />
     <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.7" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260416003" />
+    <PackageReference Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.2.250402" />
   </ItemGroup>
 
   <ItemGroup>
@@ -41,15 +42,15 @@
 
     <Authors>Ronny Schulz</Authors>
     <Company></Company>
-    <Product>Magic-Voice</Product>
-    <AssemblyTitle>Magic-Voice</AssemblyTitle>
-    <AssemblyName>MagicVoice</AssemblyName>
-    <RootNamespace>MagicVoice</RootNamespace>
+    <Product>Schreibkraft</Product>
+    <AssemblyTitle>Schreibkraft</AssemblyTitle>
+    <AssemblyName>Schreibkraft</AssemblyName>
+    <RootNamespace>Schreibkraft</RootNamespace>
     <Copyright>Copyright 2026 Ronny Schulz</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <StartupObject>MagicVoice.Program</StartupObject>
+    <StartupObject>Schreibkraft.Program</StartupObject>
   </PropertyGroup>
 
 </Project>

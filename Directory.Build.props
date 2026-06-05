@@ -4,15 +4,18 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <Deterministic>true</Deterministic>
-    <Authors>Magic-S2T</Authors>
-    <Product>Magic-S2T</Product>
+    <Authors>Schreibkraft</Authors>
+    <Product>Schreibkraft</Product>
 
     <!-- Zentrale Versionsnummer für App-Assemblies (AppVersion).
          An einer Stelle ändern; Projekte erben über $(AppVersion).
          Format: Major.Minor.Patch (3-stellig). -->
-    <AppVersion>0.4.0</AppVersion>
+    <AppVersion>1.2.0</AppVersion>
     <Version>$(AppVersion)</Version>
     <AssemblyVersion>$(AppVersion).0</AssemblyVersion>
     <FileVersion>$(AppVersion).0</FileVersion>
+    <!-- Ohne dieses Flag hängt das .NET-SDK die Git-Commit-ID an die InformationalVersion
+         (SemVer-Metadaten nach „+“) — erscheint dann in Fenstertitel und ProductVersion. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 </Project>
