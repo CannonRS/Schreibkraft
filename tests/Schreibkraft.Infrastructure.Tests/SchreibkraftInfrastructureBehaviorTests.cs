@@ -271,4 +271,30 @@ public class InfrastructureBehaviorTests
         Assert.Equal("Transform default.", loaded.Assistants.Single().Prompt);
         Directory.Delete(temp, recursive: true);
     }
+
+    [Fact]
+    public async Task SettingsService_migrates_transform_assistant_from_generate_default_prompt()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), $"Schreibkraft-tests-{Guid.NewGuid():N}");
+        var service = new SettingsService(CreateProfile(), temp);
+        var settings = new AppSettings
+        {
+            Assistants =
+            [
+                new AssistantInstance
+                {
+                    Type = AssistantMode.Transform,
+                    Name = "Korrektur",
+                    Hotkey = "Ctrl+Shift+1",
+                    Prompt = "Generate default."
+                }
+            ]
+        };
+
+        await service.SaveAsync(settings);
+        var loaded = await service.LoadAsync();
+
+        Assert.Equal("Transform default.", loaded.Assistants.Single().Prompt);
+        Directory.Delete(temp, recursive: true);
+    }
 }

@@ -321,13 +321,18 @@ public static class AssistantPromptDefaults
             ?? string.Empty;
 
         if (IsKnownDefaultPrompt(profile, mode, prompt)
-            || (mode == AssistantMode.Generate && IsKnownDefaultPrompt(profile, AssistantMode.Transform, prompt)))
+            || IsKnownDefaultPromptForDifferentMode(profile, mode, prompt))
         {
             return modeDefault;
         }
 
         return string.IsNullOrWhiteSpace(prompt) ? modeDefault : prompt;
     }
+
+    private static bool IsKnownDefaultPromptForDifferentMode(IAppProfile profile, AssistantMode mode, string? prompt) =>
+        profile.Modes
+            .Where(definition => definition.Mode != mode)
+            .Any(definition => IsKnownDefaultPrompt(profile, definition.Mode, prompt));
 
     private static bool PromptEquals(string? left, string? right) =>
         string.Equals(NormalizePrompt(left), NormalizePrompt(right), StringComparison.Ordinal);

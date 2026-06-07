@@ -1,6 +1,6 @@
 #define AppName "Schreibkraft"
 #ifndef AppVersion
-#define AppVersion "1.2.0"
+#define AppVersion "1.2.1"
 #endif
 #ifndef SourceDir
 #define SourceDir "..\artifacts\publish\Schreibkraft"
