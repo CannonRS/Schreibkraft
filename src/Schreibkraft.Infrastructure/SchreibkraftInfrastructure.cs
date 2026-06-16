@@ -307,6 +307,11 @@ public sealed class SettingsService : ISettingsService
         settings.ClipboardInsertRetriesOnFailure = Math.Clamp(settings.ClipboardInsertRetriesOnFailure, 0, 5);
         settings.RecordingSoundVolumePercent = Math.Clamp(settings.RecordingSoundVolumePercent, 0, 100);
 
+        if (!Enum.IsDefined(settings.Theme))
+        {
+            settings.Theme = AppTheme.System;
+        }
+
         // Eine leere Liste (`[]`) ist faktisch wie "kein Assistent konfiguriert" — die App
         // ist dann ohne Wirkung und der User würde im UI eine leere Hotkey-Seite sehen.
         // ??= würde nur null ersetzen, nicht eine leere Liste, daher hier explizit prüfen.

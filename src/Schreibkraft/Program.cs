@@ -23,6 +23,7 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
     private IFeedbackSoundService? _sounds;
     private IAppProfile? _profile;
     private IClipboardSourceCapture? _clipboardCapture;
+    private StatusOverlayWindow? _overlay;
     private string? _capturedSourceText;
     private string? _activeRecordingAssistantId;
     private string? _pendingRecordingAssistantId;
@@ -86,6 +87,11 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
             _status = _services.GetRequiredService<ITrayStatusService>();
             _sounds = _services.GetRequiredService<IFeedbackSoundService>();
             _clipboardCapture = _services.GetRequiredService<IClipboardSourceCapture>();
+
+            _overlay = new StatusOverlayWindow();
+            _overlay.IsEnabled = earlySettings.ShowStatusOverlay;
+            _window.Overlay = _overlay;
+            _status.StatusChanged += (_, args) => _overlay?.UpdateStatus(args.Status, args.Message);
 
             _hotkeys.HotkeyDown += OnHotkeyDown;
             _hotkeys.HotkeyUp += OnHotkeyUp;
@@ -305,6 +311,7 @@ public sealed partial class App : Microsoft.UI.Xaml.Application
         }
 
         _tray?.Dispose();
+        _overlay?.Close();
         if (_services is not null)
         {
             await _services.DisposeAsync();

@@ -64,6 +64,13 @@ public enum InsertMethod
     SendInput
 }
 
+public enum AppTheme
+{
+    System = 0,
+    Light,
+    Dark
+}
+
 public sealed record AssistantModeDefinition(
     AssistantMode Mode,
     string Name,
@@ -144,6 +151,10 @@ public sealed class AppSettings
     public string LastSelectedSettingsSection { get; set; } = "overview";
     /// <summary>UI language preference. Auto = follow system culture at app start.</summary>
     public UiLanguage UiLanguage { get; set; } = UiLanguage.Auto;
+    /// <summary>Farbschema der Anwendung. System = folgt dem Betriebssystem-Theme.</summary>
+    public AppTheme Theme { get; set; } = AppTheme.System;
+    /// <summary>Wenn true, wird das Status-Overlay am oberen Bildschirmrand angezeigt.</summary>
+    public bool ShowStatusOverlay { get; set; } = true;
     public WindowBounds WindowBounds { get; set; } = new();
     public List<AssistantInstance> Assistants { get; set; } = new();
     /// <summary>

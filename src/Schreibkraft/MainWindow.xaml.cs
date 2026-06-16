@@ -37,6 +37,7 @@ public sealed partial class MainWindow : Window
     private const string HotkeyPage = "hotkeys";
     private const string SpellingPage = "spelling";
     private const string GeneralPage = "general";
+    private const string AppearancePage = "appearance";
     private const string DiagnosticsPage = "diagnostics";
     private const string AboutPage = "about";
     private const string GlobalStandardLabel = "(globaler Standard)";
@@ -161,6 +162,8 @@ public sealed partial class MainWindow : Window
     private readonly CheckBox _autostart = new() { Content = L.S("general.autostart") };
     private readonly TextBox _maxSeconds = TextField(L.S("general.max_recording_seconds"), "60");
     private readonly TextBox _timeoutSeconds = TextField(L.S("general.timeout_seconds"), "45");
+    private readonly ComboBox _themeCombo = new() { HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 240 };
+    private readonly CheckBox _showOverlay = new() { Content = L.S("appearance.overlay.show") };
     private readonly NumberBox _transcriptionRetriesOnFailure = RetryCountNumberBox(L.S("pipeline.retries"));
     private readonly NumberBox _llmRetriesOnFailure = RetryCountNumberBox(L.S("pipeline.retries"));
     private readonly NumberBox _clipboardInsertRetriesOnFailure = RetryCountNumberBox(L.S("pipeline.retries"));
@@ -387,6 +390,9 @@ public sealed partial class MainWindow : Window
 
     /// <summary>Aktuelle Einstellungen (nach <see cref="InitializeAfterActivationAsync"/>), für den App-Startpfad.</summary>
     internal AppSettings Settings => _settings;
+
+    /// <summary>Referenz auf das Status-Overlay-Fenster, damit Sichtbarkeits-Änderungen live wirken.</summary>
+    internal StatusOverlayWindow? Overlay { get; set; }
 
     public void HideToTray()
     {
@@ -945,6 +951,7 @@ public sealed partial class MainWindow : Window
         _navigation.MenuItems.Add(NavItem(L.S("nav.processing"), PipelinePage, "\uE774"));
         _navigation.MenuItems.Add(NavItem(L.S("nav.audio_language"), AudioLanguagePage, "\uE8D6"));
         _navigation.MenuItems.Add(NavItem(L.S("nav.general"), GeneralPage, "\uE713"));
+        _navigation.MenuItems.Add(NavItem(L.S("nav.appearance"), AppearancePage, "\uE790"));
         _navigation.MenuItems.Add(NavItem(L.S("nav.diagnostics"), DiagnosticsPage, "\uE9D9"));
         _navigation.MenuItems.Add(NavItem(L.S("nav.about"), AboutPage, "\uE946"));
         _navigation.OpenPaneLength = ComputeNavigationPaneWidth();
@@ -1005,6 +1012,21 @@ public sealed partial class MainWindow : Window
         titleBar.ButtonInactiveForegroundColor = fgInactive;
         titleBar.ButtonHoverBackgroundColor = hoverBg;
         titleBar.ButtonPressedBackgroundColor = pressedBg;
+    }
+
+    /// <summary>
+    /// Wendet das vom Benutzer gewählte Farbschema auf das Hauptfenster an.
+    /// System = folgt dem Betriebssystem-Theme, Light/Dark = explizite Wahl.
+    /// </summary>
+    private void ApplyTheme(AppTheme theme)
+    {
+        Root.RequestedTheme = theme switch
+        {
+            AppTheme.Light => ElementTheme.Light,
+            AppTheme.Dark => ElementTheme.Dark,
+            _ => ElementTheme.Default
+        };
+        ApplyCaptionButtonColors();
     }
 
     /// <summary>
@@ -1092,6 +1114,7 @@ public sealed partial class MainWindow : Window
                     HotkeyPage => BuildHotkeyPage(),
                     SpellingPage => BuildSpellingPage(),
                     GeneralPage => BuildGeneralPage(),
+                    AppearancePage => BuildAppearancePage(),
                     DiagnosticsPage => BuildDiagnosticsPage(),
                     AboutPage => BuildAboutPage(),
                     _ => BuildOverviewPage()
@@ -2349,6 +2372,7 @@ public sealed partial class MainWindow : Window
             (HotkeyPage, "nav.assistants"),
             (SpellingPage, "nav.spelling"),
             (GeneralPage, "nav.general"),
+            (AppearancePage, "nav.appearance"),
             (DiagnosticsPage, "nav.diagnostics"),
             (AboutPage, "nav.about"),
         };
@@ -2456,6 +2480,35 @@ public sealed partial class MainWindow : Window
                 ActionRow(Button(L.S("general.reset"), ResetDefaults))
             }
         }));
+        return Page(panel);
+    }
+
+    private UIElement BuildAppearancePage()
+    {
+        var panel = PageStack();
+
+        // Theme-Card
+        var themeStack = new StackPanel { Spacing = 8 };
+        themeStack.Children.Add(Header(L.S("appearance.theme")));
+
+        _themeCombo.Items.Clear();
+        _themeCombo.Items.Add(L.S("appearance.theme.system"));
+        _themeCombo.Items.Add(L.S("appearance.theme.light"));
+        _themeCombo.Items.Add(L.S("appearance.theme.dark"));
+        _themeCombo.SelectedIndex = _settings.Theme switch
+        {
+            AppTheme.Light => 1,
+            AppTheme.Dark => 2,
+            _ => 0
+        };
+        themeStack.Children.Add(_themeCombo);
+
+        panel.Children.Add(Card(themeStack));
+
+        // Overlay-Card
+        panel.Children.Add(Card(Form(L.S("appearance.overlay"), null,
+            _showOverlay)));
+
         return Page(panel);
     }
 
@@ -2696,6 +2749,14 @@ public sealed partial class MainWindow : Window
         _transcriptionRetriesOnFailure.Value = _settings.TranscriptionRetriesOnFailure;
         _llmRetriesOnFailure.Value = _settings.LlmRetriesOnFailure;
         _clipboardInsertRetriesOnFailure.Value = _settings.ClipboardInsertRetriesOnFailure;
+        _themeCombo.SelectedIndex = _settings.Theme switch
+        {
+            AppTheme.Light => 1,
+            AppTheme.Dark => 2,
+            _ => 0
+        };
+        _showOverlay.IsChecked = _settings.ShowStatusOverlay;
+        ApplyTheme(_settings.Theme);
         ApplyApiKeysFromSettings();
         RefreshDiagnostics();
         _settings.LastSelectedSettingsSection = NormalizeSectionTag(_settings.LastSelectedSettingsSection);
@@ -2758,7 +2819,8 @@ public sealed partial class MainWindow : Window
         _sttApiKeyReplace.Click += (_, _) => BeginApiKeyReplacement(isLlm: false);
 
         foreach (var cb in new[] { _sttProvider, _sttModel, _llmProvider, _llmModel,
-                                   _audioInputDevice, _inputLanguage, _outputLanguage, _insertMethod })
+                                   _audioInputDevice, _inputLanguage, _outputLanguage, _insertMethod,
+                                   _themeCombo })
         {
             cb.SelectionChanged += OnSelectionChanged;
         }
@@ -2778,11 +2840,24 @@ public sealed partial class MainWindow : Window
         };
         _testRecordingSound.Click += async (_, _) => await TestRecordingSoundAsync();
 
-        foreach (var chk in new[] { _restoreClipboard, _launchMinimized, _minimizeToTray, _playRecordingSounds, _autostart })
+        _themeCombo.SelectionChanged += (_, _) =>
+        {
+            var theme = _themeCombo.SelectedIndex switch
+            {
+                1 => AppTheme.Light,
+                2 => AppTheme.Dark,
+                _ => AppTheme.System
+            };
+            ApplyTheme(theme);
+        };
+
+        foreach (var chk in new[] { _restoreClipboard, _launchMinimized, _minimizeToTray, _playRecordingSounds, _autostart, _showOverlay })
         {
             chk.Checked += OnToggle;
             chk.Unchecked += OnToggle;
         }
+        _showOverlay.Checked += (_, _) => { if (Overlay is not null) Overlay.IsEnabled = true; };
+        _showOverlay.Unchecked += (_, _) => { if (Overlay is not null) Overlay.IsEnabled = false; };
         _playRecordingSounds.Checked += (_, _) => UpdateRecordingSoundControls();
         _playRecordingSounds.Unchecked += (_, _) => UpdateRecordingSoundControls();
 
@@ -2996,6 +3071,13 @@ public sealed partial class MainWindow : Window
         _settings.TranscriptionRetriesOnFailure = ReadRetryCount(_transcriptionRetriesOnFailure);
         _settings.LlmRetriesOnFailure = ReadRetryCount(_llmRetriesOnFailure);
         _settings.ClipboardInsertRetriesOnFailure = ReadRetryCount(_clipboardInsertRetriesOnFailure);
+        _settings.Theme = _themeCombo.SelectedIndex switch
+        {
+            1 => AppTheme.Light,
+            2 => AppTheme.Dark,
+            _ => AppTheme.System
+        };
+        _settings.ShowStatusOverlay = _showOverlay.IsChecked == true;
         }
 
         if (scope is not (SettingsCaptureScope.Assistants or SettingsCaptureScope.All))
@@ -3079,7 +3161,7 @@ public sealed partial class MainWindow : Window
     private static SettingsCaptureScope CaptureScopeForPage(string? page) => NormalizeSectionTag(page) switch
     {
         HotkeyPage => SettingsCaptureScope.Assistants,
-        OverviewPage or AudioLanguagePage or PipelinePage or GeneralPage => SettingsCaptureScope.Shell,
+        OverviewPage or AudioLanguagePage or PipelinePage or GeneralPage or AppearancePage => SettingsCaptureScope.Shell,
         _ => SettingsCaptureScope.None
     };
 
@@ -3937,6 +4019,7 @@ public sealed partial class MainWindow : Window
         HotkeyPage => L.S("page.title.assistants"),
         SpellingPage => L.S("page.title.spelling"),
         GeneralPage => L.S("page.title.general"),
+        AppearancePage => L.S("page.title.appearance"),
         DiagnosticsPage => L.S("page.title.diagnostics"),
         AudioLanguagePage => L.S("page.title.audio_language"),
         AboutPage => L.S("page.title.about"),
@@ -3993,7 +4076,7 @@ public sealed partial class MainWindow : Window
             _ => tag
         };
 
-        return t is OverviewPage or AudioLanguagePage or PipelinePage or HotkeyPage or SpellingPage or GeneralPage or DiagnosticsPage or AboutPage
+        return t is OverviewPage or AudioLanguagePage or PipelinePage or HotkeyPage or SpellingPage or GeneralPage or AppearancePage or DiagnosticsPage or AboutPage
             ? t
             : OverviewPage;
     }

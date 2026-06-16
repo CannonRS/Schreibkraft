@@ -156,6 +156,7 @@ public static class LocalizationStrings
         ["nav.assistants"] = "Assistants",
         ["nav.spelling"] = "Spelling correction",
         ["nav.general"] = "General",
+        ["nav.appearance"] = "Appearance",
         ["nav.diagnostics"] = "Diagnostics",
         ["nav.about"] = "About",
 
@@ -166,8 +167,17 @@ public static class LocalizationStrings
         ["page.title.assistants"] = "Assistants",
         ["page.title.spelling"] = "Spelling correction",
         ["page.title.general"] = "General",
+        ["page.title.appearance"] = "Appearance",
         ["page.title.diagnostics"] = "Diagnostics",
         ["page.title.about"] = "About",
+
+        // Appearance page
+        ["appearance.theme"] = "Theme",
+        ["appearance.theme.system"] = "System default",
+        ["appearance.theme.light"] = "Light",
+        ["appearance.theme.dark"] = "Dark",
+        ["appearance.overlay"] = "Status overlay",
+        ["appearance.overlay.show"] = "Show status overlay during recording and processing",
 
         // Common buttons / actions
         ["common.add"] = "Add",
@@ -459,7 +469,7 @@ public static class LocalizationStrings
 
         ["settings.saved.status"] = "Settings saved. Status={0}",
         ["error.no_recording_device"] = "No working recording device available.",
-        ["status.recording_release"] = "Recording … release to process.",
+        ["status.recording_release"] = "Recording …",
         ["status.inactive.long"] = "Inactive. Activate the app from the tray menu to use hotkeys.",
         ["error.mic_access"] = "Microphone access failed. Please check the microphone and Windows privacy settings.",
         ["error.tray_window"] = "Could not create tray window.",
@@ -639,6 +649,7 @@ public static class LocalizationStrings
         ["nav.assistants"] = "Assistenten",
         ["nav.spelling"] = "Rechtschreibkorrektur",
         ["nav.general"] = "Allgemein",
+        ["nav.appearance"] = "Aussehen",
         ["nav.diagnostics"] = "Diagnose",
         ["nav.about"] = "Über",
 
@@ -648,8 +659,17 @@ public static class LocalizationStrings
         ["page.title.assistants"] = "Assistenten",
         ["page.title.spelling"] = "Rechtschreibkorrektur",
         ["page.title.general"] = "Allgemein",
+        ["page.title.appearance"] = "Aussehen",
         ["page.title.diagnostics"] = "Diagnose",
         ["page.title.about"] = "Über",
+
+        // Appearance page
+        ["appearance.theme"] = "Farbschema",
+        ["appearance.theme.system"] = "Systemstandard",
+        ["appearance.theme.light"] = "Hell",
+        ["appearance.theme.dark"] = "Dunkel",
+        ["appearance.overlay"] = "Status-Overlay",
+        ["appearance.overlay.show"] = "Status-Overlay während Aufnahme und Verarbeitung anzeigen",
 
         ["common.add"] = "hinzufügen",
         ["common.remove"] = "entfernen",
@@ -925,7 +945,7 @@ public static class LocalizationStrings
 
         ["settings.saved.status"] = "Einstellungen gespeichert. Status={0}",
         ["error.no_recording_device"] = "Kein funktionierendes Aufnahmegerät verfügbar.",
-        ["status.recording_release"] = "Aufnahme läuft … Loslassen, um zu verarbeiten.",
+        ["status.recording_release"] = "Aufnahme läuft …",
         ["status.inactive.long"] = "Inaktiv. Aktiviere die App im Tray-Menü, um Tastenkürzel zu nutzen.",
         ["error.mic_access"] = "Mikrofonzugriff fehlgeschlagen. Bitte prüfe Mikrofon und Windows-Datenschutzeinstellungen.",
         ["error.tray_window"] = "Tray-Fenster konnte nicht erstellt werden.",

@@ -2,7 +2,7 @@
 
 Schreibkraft ist eine Windows-Desktop-App für gesprochene Eingabe bei gedrückter Taste (Push-to-Talk). Die App nimmt Audio lokal auf, transkribiert es über den konfigurierten Anbieter, verarbeitet den Text per KI und fügt das Ergebnis in die aktive Anwendung ein. Du kannst beliebig viele Assistenten mit eigenem Typ, Tastenkürzel, Anweisung, Schreibstil, Intensität, Sprache und Formatierung anlegen.
 
-**Aktuelle Version:** 1.2.1
+**Aktuelle Version:** 1.3.0
 
 **Hinweis:** Die App und der zugehörige Quellcode wurden wesentlich mit KI-gestützter Entwicklung (z. B. Assistent in der IDE) erstellt und von Menschen geprüft und freigegeben.
 
